@@ -391,3 +391,287 @@ FINISH PROGRAM  | Tue Feb 10 21:08:08 WIB 2026
 ```
 
 Dengan cancel, job tidak akan dijalankan dan langsung ke akhir program
+
+### `joinAll` Function
+
+Dalam pengembangan aplikasi, sering terdapat kebutuhan untuk menjalankan banyak coroutine secara
+bersamaan
+
+Jika menggunakan function `join()` biasa, kode akan menjadi repetitif karena harus memanggil
+`join()` satu persatu
+
+Untuk mengatasi masalah tersebut, Kotlin sudah menyediakan function `joinAll()` menerima parameter
+berupa vararg Job atau collection of Job dan akan menunda eksekusi sampai semua job didaftarkan
+
+```kotlin
+@Test
+fun testJoinAll() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val job1: Job = launch {
+            delay(1000)
+            println("Job 1 Selesai - ${Date()}")
+        }
+
+        val job2: Job = launch {
+            delay(2000)
+            println("Job 2 Selesai - ${Date()}")
+        }
+
+        // Menunggu kedua job sekaligus
+        joinAll(job1, job2)
+    }
+    println("FINISH PROGRAM  | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Wed Feb 11 08:35:14 WIB 2026
+Job 1 Selesai - Wed Feb 11 08:35:15 WIB 2026
+Job 2 Selesai - Wed Feb 11 08:35:16 WIB 2026
+FINISH PROGRAM  | Wed Feb 11 08:35:16 WIB 2026
+```
+
+## Cancellable Coroutine
+
+Materi sebelumnya telah dipelajari bahwa function `cancel()` digunakan untuk membatalkan Job, namun
+perlu dipahami bahwa pembatalan Job bersifat **Cooperative**
+
+Artinya, kode program dalam Coroutine harus "mau" atau "bisa" dibatalkan. Jika sebuah coroutine
+sedang melakukan proses yang berat dan tidak menerima status pembatalan, maka coroutine tersebut *
+*tidak akan berhenti** meskipun `cancel()` sudah dipanggil
+
+`cancel()` sebenarnya hanya mengirimkan signal kepada Job bahwa ia harus berhenti, dan jika kode
+didalamnya tidak peduli sinyal tersebut maka kode akan tetap dijalankan
+
+**Implementasi Kode (Bermasalah)**
+Berikut adalah kode dimana coroutine **gagal** dibatalkan karena menggunakan `Thread.sleep()` (
+bersifat blocking dan tidak mengecek cancellation) alih alih `delay()` (bersifat suspend dan
+mengecek cancellation)
+
+**Uncancelable Coroutine**
+
+```kotlin
+@Test
+fun testCanNotCancel() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val job: Job = GlobalScope.launch {
+            // Thread.sleep memblokir thread dan TIDAK mengecek status cancel
+            // Akibatnya, sinyal cancel akan diabaikan selama proses ini
+            Thread.sleep(2000)
+            println("End Coroutine: ${Date()}")
+        }
+        // Memberi waktu sedikit agar coroutine mulai berjalan
+        delay(1000)
+        println("Membatalkan Job...")
+        job.cancel()
+
+        // Menunggu job benar-benar selesai (untuk membuktikan bahwa ia tidak berhenti saat di-cancel)
+        job.join()
+    }
+    println("FINISH PROGRAM  | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Wed Feb 11 08:52:37 WIB 2026
+Membatalkan Job...
+End Coroutine: Wed Feb 11 08:52:39 WIB 2026
+FINISH PROGRAM  | Wed Feb 11 08:52:39 WIB 2026
+```
+
+Meskipun `job.cancel()` dipanggil setelah 1 detik, pesan `"End Coroutine"` akan tetap muncul setelah
+2 detik. Ini membuktikan bahwa coroutine tersebut tidak bisa dibatalkan (non-cancellable) karena
+kodenya tidak kooperatif.
+
+**Cancellable Coroutine (Cooperative)**
+
+Agar coroutine dapat dibatalkan, kode didalamnya harus secara aktif menerima status pembatalan dan
+terdapat 2 cara untuk melakukan ini:
+
+1. Menggunakan property `isActive`: akan bernilai true jika coroutine masih aktif dan false jika
+   sudah dibatalkan
+2. Menggunakan function `ensureActive()`: Fungsi ini akan mengecek apakah Job masih aktif. Jika
+   tidak function ini akan melempar CancellationException untuk menghentikan paksa proses yang
+   sedang berjalan
+
+```kotlin
+@Test
+fun testCancelCooperative() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val job = GlobalScope.launch {
+            println("Start Coroutine: ${Date()}")
+            for (i in 1..10) {
+                // CARA 1: Cek manual
+                // if (!isActive) break
+
+                // CARA 2: ensureActive() (Lebih direkomendasikan)
+                // Jika job sudah di-cancel, baris ini akan throw CancellationException
+                ensureActive()
+                println("Processing $i: ${Date()}")
+                Thread.sleep(500) // Simulasi proses berat (blocking)
+            }
+            println("End Coroutine: ${Date()}")
+        }
+        delay(1200) // Biarkan berjalan sebentar (sekitar 2 loop)
+        println("Membatalkan Job...")
+        job.cancel()
+
+        job.join()
+    }
+    println("FINISH PROGRAM  | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Thu Feb 12 15:39:53 WIB 2026
+Start Coroutine: Thu Feb 12 15:39:53 WIB 2026
+Processing 1: Thu Feb 12 15:39:53 WIB 2026
+Processing 2: Thu Feb 12 15:39:54 WIB 2026
+Processing 3: Thu Feb 12 15:39:54 WIB 2026
+Membatalkan Job...
+FINISH PROGRAM  | Thu Feb 12 15:39:55 WIB 2026
+```
+
+## Setelah Coroutine Dibatalkan
+
+Ketika sebuah coroutine dibatalkan dengan function `cancel()`, secara internal coroutine tersebut
+akan melempar error bernama `CancellationException`. Karena dianggap sebagai exception, maka
+mekanisme standard try-catch-finally dalam kotlin dapat dimanfaatkan
+
+Blok `finally` adalah blok kode yang akan selalu dieksekusi, oleh karena itu ini blok ini adalah
+blok yang tepat untuk dimanfaatkan sebagai **resource cleanup**
+
+- Menutup koneksi database
+- Menutup file yang sedang dibuka
+- Menyimpan log
+
+```kotlin
+@Test
+fun testJobFinally() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val job: Job = GlobalScope.launch {
+            try {
+                println("Start Coroutine")
+                delay(2000)
+                println("End   Coroutine")
+            } finally {
+                println("Finish Coroutine - Cleanup Code")
+            }
+        }
+        delay(1000)
+        println("Membatalkan Job,,,,,")
+        job.cancel() // Memicu CancellationException
+
+        job.join() // Menunggu proses cleanup
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Fri Feb 13 07:08:47 WIB 2026
+Start Coroutine
+Membatalkan Job,,,,,
+Finish Coroutine - Cleanup Code
+FINISH PROGRAM | Fri Feb 13 07:08:48 WIB 2026
+```
+
+## Timeout
+
+Dalam sebuah aplikasi seringkali eksekusi sebuah program memakan waktu yang lebih lama dari yang
+diharapkan, misalnya koneksi dari server sedang bermasalah seingga server tidak merespon request
+data
+
+Menunggu proses tersebut tanpa batas waktu adalah (_indefinite waiting_) adalah praktik yang buruk
+yang membuat aplikasi seolah olah macet atau berhenti
+
+Kotlin Coroutine menyediakan mekanisme bawaan untuk membatasi durasi eksekusi sebuah coroutine
+menggunakan function `withTimeout()`
+
+**Cara Kerja**
+
+Function `withTimeout(time)` akan menjalankan blok kode didalamnya. Jika proses selesai sebelum
+waktu habis, hasilnya akan dikembalikan. Namun, jika durasinya melebihi waktu yang ditentukan,
+function ini akan membatalkan coroutine secara paksa dan mengembalikan
+`TimeoutCancellationException`
+
+Terdapat juga `withTimeOutOrNull()` untuk mengembalikan null daripada `TimeoutCancellationException`
+
+```kotlin
+@Test
+fun testTimeout() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val job = launch {
+            println("Start Coroutine")
+            // Atur batas waktu 1 detik untuk proses
+            withTimeout(1000) {
+                repeat(10) {
+                    // SImulasi proses yang membutuhkan waktu 4 detik
+                    delay(400)
+                    println("$it. Masih proses... ${Date()}")
+                }
+            }
+            println("Finish Coroutine") // Tidak akan dieksekusi
+        }
+        job.join()
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+```
+START PROGRAM  | Fri Feb 13 07:21:43 WIB 2026
+Start Coroutine
+0. Masih proses... Fri Feb 13 07:21:43 WIB 2026
+1. Masih proses... Fri Feb 13 07:21:44 WIB 2026
+FINISH PROGRAM | Fri Feb 13 07:21:44 WIB 2026
+```
+
+```kotlin
+@Test
+fun testTimeoutOrNull() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        println("Start Coroutine")
+        // Return sebuah value jika success dan null jika timeout
+        val result: String? = withTimeoutOrNull(1000) {
+            repeat(10) {
+                delay(400)
+            }
+            "Coroutine Berhasil Diselesaikan"
+        }
+
+        if (result == null) {
+            println("Proses Timeout (Waktu habis)")
+        } else {
+            println("Hasil: $result")
+        }
+
+        println("Finish Coroutine - Result: $result")
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+Output:
+
+```
+START PROGRAM  | Fri Feb 13 07:27:59 WIB 2026
+Start Coroutine
+Proses Timeout (Waktu habis)
+Finish Coroutine - Result: null
+FINISH PROGRAM | Fri Feb 13 07:28:00 WIB 2026
+```
