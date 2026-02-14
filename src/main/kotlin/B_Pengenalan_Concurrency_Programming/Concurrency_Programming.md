@@ -633,6 +633,7 @@ fun testTimeout() {
 ```
 
 Output:
+
 ```
 START PROGRAM  | Fri Feb 13 07:21:43 WIB 2026
 Start Coroutine
@@ -640,6 +641,8 @@ Start Coroutine
 1. Masih proses... Fri Feb 13 07:21:44 WIB 2026
 FINISH PROGRAM | Fri Feb 13 07:21:44 WIB 2026
 ```
+
+Implementasi kode diatas adalah contoh dari timeout yang melempar `TimeoutCancellationException`
 
 ```kotlin
 @Test
@@ -666,6 +669,7 @@ fun testTimeoutOrNull() {
     println("FINISH PROGRAM | ${Date()}")
 }
 ```
+
 Output:
 
 ```
@@ -675,3 +679,516 @@ Proses Timeout (Waktu habis)
 Finish Coroutine - Result: null
 FINISH PROGRAM | Fri Feb 13 07:28:00 WIB 2026
 ```
+
+Dan diatas adalah contoh implementasi dari `withTimeoutOrNull()` untuk mengembalikan nilai Null jika
+operasi melewati batas waktu timeout
+
+## Sequential Suspend Function
+
+Secara default kode didalam sebuah coroutine akan dieksekusi secara berurutan (_sequential_). Jika
+terdapat beberapa _suspend function_ yang dipanggil, **function kedua tidak akan djialankan sebelum
+function pertama selesai dieksekusi**
+
+Sifat ini memiliki implikasi terhadap performa jika dua proses sebenarnya tidak saling bergantungan
+tetapi dijalankan secara berurutan, maka waktu total eksekusi adalah **penjumlahan** dari waktu
+kedua
+proses tersebut
+
+```kotlin
+suspend fun getProcessA(): Int {
+    delay(1000)
+    return 10
+}
+
+suspend fun getProcessB(): Int {
+    delay(1000)
+    return 20
+}
+
+@Test
+fun testSequential() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val time = measureTimeMillis {
+            val resultA = getProcessA()
+            val resultB = getProcessB()
+
+            println("Hasil A: $resultA")
+            println("Hasil B: $resultB")
+            println("Total  : ${resultA + resultB}")
+        }
+
+        println("Total Waktu: $time")
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Ouput:
+
+```
+START PROGRAM  | Fri Feb 13 21:24:36 WIB 2026
+Hasil A: 10
+Hasil B: 20
+Total  : 30
+Total Waktu: 2006
+FINISH PROGRAM | Fri Feb 13 21:24:38 WIB 2026
+BUILD SUCCESSFUL in 4s
+```
+
+Total waktu menunjukan 2000 millis menunjukan keseluruhan proses akan memakan waktu 2 detik yang
+dijalankan sequential
+
+## Async Function
+
+Sebelumnya dijelaskan bahwa secara default kode yang ada didalam coroutine berjalan secara
+**sequential**
+
+Untuk mengatasi hal ini, kotlin menyediakan function `async`
+
+**Perbedaan `Launch` dan `Async`**
+
+- `launch`: Digunakan untuk memulai coroutine yang **tidak mengembalikan hasil** dan mengembalikan
+  object **Job**
+- `asycn`: Digunakan untuk memulai coroutine yang **mengembalikan hasil** dan function ini akan
+  mengembalikan object `Deferred<T>`
+
+**Deferred**
+
+Deferred adalah turunan dari Job yang memiliki kemampuan untuk membawa return value. Anggap deferred
+sebagai "**Janji**" (Future) bahwa nilai tersebut akan tersedia dimasa depan. dan untuk menangkap
+hasilnya akan menggunakan function `await()`
+
+```kotlin
+@Test
+fun testAsync() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val time = measureTimeMillis {
+            val deferredA: Deferred<Int> = async {
+                getProcessA()
+            }
+
+            val deferredB: Deferred<Int> = async {
+                getProcessB()
+            }
+
+            val resultA = deferredA.await()
+            val resultB = deferredB.await()
+
+            println("Hasil A: $resultA")
+            println("Hasil B: $resultB")
+            println("Total  : ${resultA + resultB}")
+        }
+        println("Total Waktu: $time")
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output
+
+```
+START PROGRAM  | Sat Feb 14 06:38:05 WIB 2026
+Hasil A: 10
+Hasil B: 20
+Total  : 30
+Total Waktu: 1011
+FINISH PROGRAM | Sat Feb 14 06:38:06 WIB 2026
+```
+
+Jika pada kode sebelumnya yang tidak menggunakan `async` total waktu akan mencapai 2 detik karena
+djialankan secara sequential
+
+Dan kode diatas membuktikan bahwa kode hanya memakan waktu 1 detik, karena dijalankan secara
+asynchronous
+
+### `awaitAll()` Function
+
+Function `awaitAll()` digunakan untuk menunggu sekumpulan proses `async` selesai secara bersamaan
+dan mengembalikan hasil akhirnya dalam bentuk **list**
+
+```kotlin
+suspend fun countNumber(number: Int): Int {
+    delay(1000)
+    return number * 10
+}
+
+@Test
+fun testAwaitAll() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val time = measureTimeMillis {
+            val deferred1 = async { countNumber(1) }
+            val deferred2 = async { countNumber(2) }
+            val deferred3 = async { countNumber(3) }
+            val deferred4 = async { countNumber(4) }
+
+            val result: List<Int> = awaitAll(
+                deferred1, deferred2, deferred3, deferred4
+            )
+
+            val total = result.sum()
+            println("Hasil per item : $result")
+            println("Total          : $total")
+        }
+        println("Total Waktu    : $time")
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sat Feb 14 06:57:54 WIB 2026
+Hasil per item : [10, 20, 30, 40]
+Total          : 100
+Total Waktu    : 1014
+FINISH PROGRAM | Sat Feb 14 06:57:55 WIB 2026
+```
+
+## Coroutine Context
+
+Coroutine Context adalah sekumpulan data atau konfigurasi yang menentukan perilaku dari sebuah
+coroutine. Ini adalah "_lingkungan_" atau "_parameter_" tempat coroutine tersebut berjalan
+
+Context ini sebenarnya merupakan sebuah **map** yang menyimpan elemen-elemen penting dan dua yang
+paling utama diantaranya:
+
+- **Job**: Mengatur lifecycle coroutine
+- **Dispatcher**: Mengatur di thread mana coroutine akan dijalankan (materi beriktunya)
+
+Setiap coroutine pasti memiliki context. Saat membuat coroutine (launch/async) dapat menyisipkan
+context tertentu, atau mewarisi context dari scope induk
+
+```kotlin
+@Test
+fun testCoroutineContext() {
+    runBlocking {
+        // Mengakses context dalam runBlocking
+        val job = launch {
+            // Mengakses context dalam launch
+            val context: CoroutineContext = coroutineContext
+            println("Context    : $context")
+            println("Job        : ${context[Job]}")
+            println("Dispatcher : ${context[CoroutineDispatcher]}")
+        }
+        job.join()
+    }
+}
+```
+
+Output:
+
+```
+Context    : [CoroutineId(2), "coroutine#2":StandaloneCoroutine{Active}@3d3ba765, BlockingEventLoop@25bc0606]
+Job        : "coroutine#2":StandaloneCoroutine{Active}@3d3ba765
+Dispatcher : BlockingEventLoop@25bc0606
+```
+
+`coroutineContext` adalah property global dalam scope coroutine untuk mengambil context saat ini
+
+**Inheritance Context**
+
+```kotlin
+@Test
+fun testInheritanceCoroutineContext() {
+    runBlocking {
+        // Context dapat dikirim (misal dispatcher atau job) sebagai parameter
+        // Parameter akan digabung dengan default context
+        val job = launch(context = Dispatchers.Default + CoroutineName("TestCoroutine")) {
+            println("Running on: ${Thread.currentThread().name}")
+            println("Coroutine Name: ${coroutineContext[CoroutineName]?.name}")
+        }
+        job.join()
+    }
+}
+```
+
+Output:
+
+```
+Running on: DefaultDispatcher-worker-1 @TestCoroutine#2
+Coroutine Name: TestCoroutine
+```
+
+Operator `+` : Coroutine context memiliki kemampuan unik untuk digabungkan menggunakan operator `+`.
+Ini akan menggabungkan konfigurasi thread pool (Dispatcher) dengan nama coroutine untuk debugging
+
+**Note in Couroutine Context**
+
+- Job ᯓ➤ Lifecycle (Siklus hidup menentukan kapan job mulai, berhenti, mati, atau dihancurkan)
+- Dispatcher ᯓ➤ Threading (Menentukan thread yang digunakan coroutine)
+
+## Coroutine Dispatcher
+
+Dispatcher adalah komponen dalam **Context** yang menentukan pada **thread** mana Coroutine
+dijalankan
+
+Secara default, jika nilai dispatcher tidak ditentukan maka coroutine akan berjalan pada
+`Dispatchers.Default`
+
+**Important**
+
+Dalam aplikasi nyata, pemiliihan Dispatcher yang tepat **sangat krusial** agar aplikasi tetap
+responsif dan efisien
+
+Kotlin menyediakan standard Dispatcher yang siap digunakan :
+
+- `Dispatchers.Default`
+    - Digunakan untuk operasi **CPU Bound** (Image processing, Machine Learning, Short Algorithm)
+    - Menggunakan thread pool yang jumlahnya sama dengan core pada CPU
+
+- `Dispatchers.IO`
+    - Digunakan untuk proses Input/Output **IO Bound** (Get API Data, Read & Write Database, File
+      Access)
+    - Menggunakan thread pool yang dapat mengembang (elastis) hingga 64 thread (atau lebih) untuk
+      menangani banyak request tunggu sekaligus
+
+- `Dispatchers.Main`
+    - Khusus untuk ekosistem UI seperti Android / JavaFX
+    - Berjalan di Main Thread **UI-Thread**. Digunakan hanya untuk memperbarui UI dan tidak untuk
+      melakukan proses berat
+    - _Note_: Untuk menggunakan dispatcher ini pada Unit Test, diperlukan library tambahan
+      `kotlinx-coroutines-test`
+
+- `Dispatcher.Unconfined`
+    - Dispatcher yang tidak memiliki pendirian. Ia memulai coroutine di thread pemanggilnya, tetapi
+      setelah disuspend ia bisa melanjutkan eksekusi di thread mana saja (tergantung suspend
+      function yang dipanggil)
+    - Jarang digunakan dalam implementasi aplikasi pada umumnya
+
+**Thread Pool**
+
+Mekanisme manajemen thread untuk menyediakan sekumpulan thread yang sudah dibuat (pre-initialized)
+dan siap bekerja (standby), alih alih membuat thread baru setiap ada tugas
+
+```kotlin
+@Test
+fun testDispatcher() {
+    runBlocking {
+        println("Parent Thread - ${Thread.currentThread().name}")
+
+        // Dispatcher Default
+        val jobDefault = launch(context = Dispatchers.Default) {
+            println("Job Default running in    : ${Thread.currentThread().name}")
+        }
+
+        // Dispatcher IO
+        val jobIO = launch(context = Dispatchers.IO) {
+            println("Job IO running in         : ${Thread.currentThread().name}")
+        }
+
+        // Dispatcher Unconfined
+        val jobUnconfined = launch(context = Dispatchers.Unconfined) {
+            println("Job Unconfined running in : ${Thread.currentThread().name}")
+        }
+
+        joinAll(jobDefault, jobIO, jobUnconfined)
+    }
+}
+```
+
+Output:
+
+```
+Parent Thread - Test worker @coroutine#1
+Job Default running in    : DefaultDispatcher-worker-1 @coroutine#2
+Job IO running in         : DefaultDispatcher-worker-1 @coroutine#3
+Job Unconfined running in : Test worker @coroutine#4
+```
+
+**Note**
+
+Sejak kotlin versi 1.3.30, `Dispatchers.Default` dan `Dispatchers.IO` berbagi **Thread Pool** yang
+sama.
+
+Hal tersebut menjelaskan mengapa nama Default Dispatcher dan IO Dispatcher menggunakan nama yang
+sama, karena memang kolamnya sama
+
+Mesikpun memliki kolam yang sama, Kebijakan / Policy dari penggunaanya berbeda
+
+- Default : Dibatasi sejumlah Core CPU
+
+  Jika laptop memiliki 8 Core, maka Dispatchers.Default hanya akan menggunakan maksimal 8 thread
+  dari kolam tersebut secara bersamaan. Ini agar CPU tidak overload.
+- IO : Dibatasi hingga 64 thread (atau lebih, tergantung konfigurasi)
+
+  Ini memungkinkan aplikasi melakukan banyak request network/database sekaligus (karena tugas ini
+  hanya menunggu, tidak memakan CPU).
+
+## `withContext` Function
+
+Ada kalanya dalam sebuah alur bisnis, diperlukan untuk berpindah pindah thread:
+
+- Mulai di Main Thread (UI)
+- Pindah ke IO Thread (Ambil data Database)
+- Kembali ke Main Thread (Tampilkan Data)
+
+Jika menggunakan cara lama, dapat dilakukan dengan menggunakan nesting coroutine yang merupakan
+pendekatan yang buruk untuk memanggil IOThread didalam MainThread
+
+Cara yang modern dapat dilakukan dengan `withContext`
+
+**withContext** merupakan suspend function yang memungkinkan untuk mengubah context (normally
+dispatcher) hanya **untuk blok kode tertentu**
+
+Setelah blok kode tersebut selesai eksekusi akan dikembalikan ke Dispatcher awal secara otomatis
+
+Function ini juga mengembalikan value, sehingga cocok digunakan untuk mengambil hasil dari proses
+thread lain
+
+**Implementasi**
+
+Berikut alur yang akan diimplementasikan :
+
+1. Start dari Default Dispatcher worker 1
+2. Menjalankan proses Default Dispatcher worker 2 (Berubah ke IO)
+3. Kembali ke Default Dispatcher worker 1
+
+```kotlin
+@Test
+fun testWithContext() {
+    val dispatcherClient = Executors.newFixedThreadPool(1).asCoroutineDispatcher()
+    val dispatcherServer = Executors.newFixedThreadPool(1).asCoroutineDispatcher()
+
+    runBlocking {
+        // Mulai coroutine di dispatcherClient (Thread Awal)
+        val job = launch(context = dispatcherClient) {
+            println("1. Start pada Thread  : ${Thread.currentThread().name}")
+
+            // Pindah ke dispatcherServer (Thread Proses) menggunakan withContext
+            val result: String = withContext(context = dispatcherServer) {
+                println("2. Proses pada Thread : ${Thread.currentThread().name}")
+                Thread.sleep(1000) // Simulasi proses berat
+                "Data Success" // Return value
+            }
+
+            // Otomatis kembali ke dispatcherClient (Thread Awal)
+            println("4. Kembali ke Thread  : ${Thread.currentThread().name}")
+            println("Hasil data            : $result")
+        }
+        job.join()
+    }
+}
+```
+
+Output:
+
+```
+1. Start pada Thread  : pool-1-thread-1 @coroutine#2
+2. Proses pada Thread : pool-2-thread-1 @coroutine#2
+4. Kembali ke Thread  : pool-1-thread-1 @coroutine#2
+Hasil data            : Data Success
+```
+
+Dari output kode diatas, proses dijalankan pada pool yang berbeda saat dengan pool mulai dan dapat
+kembali ke pool mulai dengan sebuah value
+
+## Non-Cancellable Context
+
+Telah dipelajari bahwa ketika sebuah coroutine dibatalkan maka `CancellationException` akan dilempar
+dan ditangkap dalam blok `finally` untuk dibersihkan
+
+Namun, terdapat satu batasan penting
+
+**Kode didalam blok `finally` tidak boleh menunda terlalu lama atau memanggil suspend function
+lain**. Mengapa ?, karena coroutine tersebut statusnya sudah **Cancelled**
+
+Jika sebuah suspend function (seperti delay) dipanggil di dalam blok finally pada coroutine yang
+sudah batal, maka function tersebut **akan langsung batal lagi** (melempar CancellationException
+seketika).
+
+Hal ini menjadi masalah jika proses pembersihan itu sendiri membutuhkan waktu atau berupa proses
+async (misalnya: menutup koneksi database secara graceful atau mengirim sinyal "Logout" ke server).
+
+Untuk mengatasi hal ini, Kotlin menyediakan object khusus bernama **NonCancellable**. Dengan
+menggunakan
+context ini, blok kode tertentu dapat **dipaksa** untuk tetap berjalan hingga selesai meskipun
+parent
+coroutine-nya sudah dibatalkan.
+
+**Error Test**
+
+```kotlin
+@Test
+fun testFinallyError() {
+    runBlocking {
+        println("START PROGRAM  | ${Date()}")
+        val job = launch {
+            try {
+                println("Start Coroutine :${Date()}")
+                delay(2000)
+                println("End Coroutine   :${Date()}")
+            } finally {
+                println("Masuk Finally")
+                // Masalah: delay() adalah suspend function.
+                // Karena job sudah di-cancel, delay ini akan langsung gagal (throw error)
+                // dan baris di bawahnya tidak akan tereksekusi.
+                delay(1000)
+                println("Log ini tidak akan pernah muncul")
+            }
+        }
+
+        delay(1000)
+        println("Membatalkan job...")
+        job.cancelAndJoin()
+        println("FINISH PROGRAM | ${Date()}")
+    }
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sat Feb 14 21:55:07 WIB 2026
+Start Coroutine :Sat Feb 14 21:55:07 WIB 2026
+Membatalkan job...
+Masuk Finally
+FINISH PROGRAM | Sat Feb 14 21:55:08 WIB 2026
+```
+
+Log dalam finally tidak akan pernah dijalankan karena `delay` gagal untuk dieksekusi
+
+**Solusi dengan NonCancellable**
+
+```kotlin
+@Test
+fun testNonCancellable() {
+    runBlocking {
+        println("START PROGRAM  | ${Date()}")
+        val job = launch {
+            try {
+                println("Start Coroutine :${Date()}")
+                delay(2000)
+                println("End Coroutine   :${Date()}")
+            } finally {
+                withContext(context = NonCancellable) {
+                    println("Masuk Finally (Non-Cancellable)")
+                    delay(1000)
+                    println("Log tetap muncul!")
+                }
+            }
+        }
+        delay(1000)
+        println("Membatalkan job...")
+        job.cancelAndJoin()
+        println("FINISH PROGRAM | ${Date()}")
+    }
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sat Feb 14 21:59:02 WIB 2026
+Start Coroutine :Sat Feb 14 21:59:02 WIB 2026
+Membatalkan job...
+Masuk Finally (Non-Cancellable)
+Log tetap muncul!
+FINISH PROGRAM | Sat Feb 14 21:59:04 WIB 2026
+```
+
+Semua log didalam blok `withContext(NonCancellable)` akan tercetak meskipun Job utamanya sudah
+dibatalkan

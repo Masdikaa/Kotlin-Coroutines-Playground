@@ -1,16 +1,29 @@
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Date
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
+import kotlin.coroutines.CoroutineContext
+import kotlin.system.measureTimeMillis
 import kotlin.test.Test
 
 @OptIn(DelicateCoroutinesApi::class)
@@ -260,5 +273,213 @@ class ConcurrencyProgramming {
             println("Finish Coroutine - Result: $result")
         }
         println("FINISH PROGRAM | ${Date()}")
+    }
+
+    suspend fun getProcessA(): Int {
+        delay(1000)
+        return 10
+    }
+
+    suspend fun getProcessB(): Int {
+        delay(1000)
+        return 20
+    }
+
+    @Test
+    fun testSequential() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            val time = measureTimeMillis {
+                val resultA = getProcessA()
+                val resultB = getProcessB()
+
+                println("Hasil A: $resultA")
+                println("Hasil B: $resultB")
+                println("Total  : ${resultA + resultB}")
+            }
+
+            println("Total Waktu: $time")
+        }
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    @Test
+    fun testAsync() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            val time = measureTimeMillis {
+                val deferredA: Deferred<Int> = async {
+                    getProcessA()
+                }
+
+                val deferredB: Deferred<Int> = async {
+                    getProcessB()
+                }
+
+                val resultA = deferredA.await()
+                val resultB = deferredB.await()
+
+                println("Hasil A: $resultA")
+                println("Hasil B: $resultB")
+                println("Total  : ${resultA + resultB}")
+            }
+            println("Total Waktu: $time")
+        }
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    suspend fun countNumber(number: Int): Int {
+        delay(1000)
+        return number * 10
+    }
+
+    @Test
+    fun testAwaitAll() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            val time = measureTimeMillis {
+                val deferred1 = async { countNumber(1) }
+                val deferred2 = async { countNumber(2) }
+                val deferred3 = async { countNumber(3) }
+                val deferred4 = async { countNumber(4) }
+
+                val result: List<Int> = awaitAll(
+                    deferred1, deferred2, deferred3, deferred4
+                )
+
+                val total = result.sum()
+                println("Hasil per item : $result")
+                println("Total          : $total")
+            }
+            println("Total Waktu    : $time")
+        }
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    @Test
+    fun testCoroutineContext() {
+        runBlocking {
+            // Mengakses context dalam runBlocking
+            val job = launch {
+                // Mengakses context dalam launch
+                val context: CoroutineContext = coroutineContext
+                println("Context    : $context")
+                println("Job        : ${context[Job]}")
+                println("Dispatcher : ${context[CoroutineDispatcher]}")
+            }
+            job.join()
+        }
+    }
+
+    @Test
+    fun testInheritanceCoroutineContext() {
+        runBlocking {
+            // Context dapat dikirim (misal dispatcher atau job) sebagai parameter
+            // Parameter akan digabung dengan default context
+            val job = launch(context = Dispatchers.Default + CoroutineName("TestCoroutine")) {
+                println("Running on: ${Thread.currentThread().name}")
+                println("Coroutine Name: ${coroutineContext[CoroutineName]?.name}")
+            }
+            job.join()
+        }
+    }
+
+    @Test
+    fun testDispatcher() {
+        runBlocking {
+            println("Parent Thread - ${Thread.currentThread().name}")
+
+            // Dispatcher Default
+            val jobDefault = launch(context = Dispatchers.Default) {
+                println("Job Default running in    : ${Thread.currentThread().name}")
+            }
+
+            // Dispatcher IO
+            val jobIO = launch(context = Dispatchers.IO) {
+                println("Job IO running in         : ${Thread.currentThread().name}")
+            }
+
+            // Dispatcher Unconfined
+            val jobUnconfined = launch(context = Dispatchers.Unconfined) {
+                println("Job Unconfined running in : ${Thread.currentThread().name}")
+            }
+
+            joinAll(jobDefault, jobIO, jobUnconfined)
+        }
+    }
+
+    @Test
+    fun testWithContext() {
+        val dispatcherClient = Executors.newFixedThreadPool(1).asCoroutineDispatcher()
+        val dispatcherServer = Executors.newFixedThreadPool(1).asCoroutineDispatcher()
+
+        runBlocking {
+            // Mulai coroutine di dispatcherClient (Thread Awal)
+            val job = launch(context = dispatcherClient) {
+                println("1. Start pada Thread  : ${Thread.currentThread().name}")
+
+                // Pindah ke dispatcherServer (Thread Proses) menggunakan withContext
+                val result: String = withContext(context = dispatcherServer) {
+                    println("2. Proses pada Thread : ${Thread.currentThread().name}")
+                    Thread.sleep(1000) // Simulasi proses berat
+                    "Data Success" // Return value
+                }
+
+                // Otomatis kembali ke dispatcherClient (Thread Awal)
+                println("4. Kembali ke Thread  : ${Thread.currentThread().name}")
+                println("Hasil data            : $result")
+            }
+            job.join()
+        }
+    }
+
+    @Test
+    fun testFinallyError() {
+        runBlocking {
+            println("START PROGRAM  | ${Date()}")
+            val job = launch {
+                try {
+                    println("Start Coroutine :${Date()}")
+                    delay(2000)
+                    println("End Coroutine   :${Date()}")
+                } finally {
+                    println("Masuk Finally")
+                    // Masalah: delay() adalah suspend function.
+                    // Karena job sudah di-cancel, delay ini akan langsung gagal (throw error)
+                    // dan baris di bawahnya tidak akan tereksekusi.
+                    delay(1000)
+                    println("Log ini tidak akan pernah muncul")
+                }
+            }
+
+            delay(1000)
+            println("Membatalkan job...")
+            job.cancelAndJoin()
+            println("FINISH PROGRAM | ${Date()}")
+        }
+    }
+
+    @Test
+    fun testNonCancellable() {
+        runBlocking {
+            println("START PROGRAM  | ${Date()}")
+            val job = launch {
+                try {
+                    println("Start Coroutine :${Date()}")
+                    delay(2000)
+                    println("End Coroutine   :${Date()}")
+                } finally {
+                    withContext(context = NonCancellable) {
+                        println("Masuk Finally (Non-Cancellable")
+                        delay(1000)
+                        println("Log tetap muncul!")
+                    }
+                }
+            }
+            delay(1000)
+            println("Membatalkan job...")
+            job.cancelAndJoin()
+            println("FINISH PROGRAM | ${Date()}")
+        }
     }
 }
