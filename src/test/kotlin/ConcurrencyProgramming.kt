@@ -1,5 +1,6 @@
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.DelicateCoroutinesApi
@@ -10,9 +11,13 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -23,6 +28,7 @@ import java.util.Date
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.system.measureTimeMillis
 import kotlin.test.Test
 
@@ -444,6 +450,7 @@ class ConcurrencyProgramming {
                     println("End Coroutine   :${Date()}")
                 } finally {
                     println("Masuk Finally")
+                    println("Is Active: $isActive")
                     // Masalah: delay() adalah suspend function.
                     // Karena job sudah di-cancel, delay ini akan langsung gagal (throw error)
                     // dan baris di bawahnya tidak akan tereksekusi.
@@ -471,6 +478,7 @@ class ConcurrencyProgramming {
                 } finally {
                     withContext(context = NonCancellable) {
                         println("Masuk Finally (Non-Cancellable")
+                        println("Is Active: $isActive")
                         delay(1000)
                         println("Log tetap muncul!")
                     }
@@ -481,5 +489,232 @@ class ConcurrencyProgramming {
             job.cancelAndJoin()
             println("FINISH PROGRAM | ${Date()}")
         }
+    }
+
+    @Test
+    fun testCoroutineScope() {
+        println("START PROGRAM  | ${Date()}")
+
+        // 1. Membuat Scope sendiri
+        //    Scope ini akan menggunakan Dispatcher IO sebagai default contextnya
+        val scope = CoroutineScope(context = Dispatchers.IO)
+
+        // 2. Menjalankan coroutine dalam scope
+        // launch dibawah merupakan milik scope, bukan GlobalScope
+        val job1 = scope.launch(start = CoroutineStart.LAZY) {
+            println("Start Job 1 | ${Date()}")
+            delay(2000)
+            println("End Job 1   | ${Date()}")
+        }
+
+        val job2 = scope.launch(start = CoroutineStart.LAZY) {
+            println("Start Job 2 | ${Date()}")
+            delay(2000)
+            println("End Job 2   | ${Date()}")
+        }
+
+        runBlocking {
+            // Menjalankan Job
+            job1.start()
+            job2.start()
+
+            delay(1000)
+            println("Membatalkan scope...")
+
+            // 3. Membatalkan scope
+            //    Saat scope dibatalkan, job1 dan job2 otomatis akan batal
+            scope.cancel()
+
+            delay(2000) // Menunggu untuk memastikan tidak ada log "End Job"
+        }
+
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    suspend fun getFoo(): Int {
+        delay(1000)
+        return 10
+    }
+
+    suspend fun getBar(): Int {
+        delay(1000)
+        return 20
+    }
+
+    // Function ini menggunakan coroutineScope untuk memparallelkan proses
+    suspend fun getSum(): Int = coroutineScope {
+        println("Mulai hitung...")
+
+        // async berjalan di dalam scope milik 'coroutineScope'
+        val foo = async { getFoo() }
+        val bar = async { getBar() }
+
+        // Menunggu hasil keduanya
+        // Jika salah satu error, getSum akan langsung error (batal)
+        foo.await() + bar.await()
+    }
+
+    @Test
+    fun testCoroutineScopeFunction() {
+        runBlocking {
+            println("START PROGRAM  | ${Date()}")
+
+            // Memanggil function yang di dalamnya ada parallel process
+            // Baris ini akan suspend selama 1 detik (bukan 2 detik, karena paralel)
+            val result = getSum()
+            println("Hasil : $result")
+
+            println("FINISH PROGRAM | ${Date()}")
+        }
+    }
+
+    @Test
+    fun testParentWaitsForChild() {
+        runBlocking {
+            val parentJob = launch {
+                println("Parent Start  : ${Date()}")
+
+                // Launching child
+                launch {
+                    println("Child Start   : ${Date()}")
+                    delay(2000) // Child butuh 2 detik
+                    println("Child End     : ${Date()}")
+                }
+
+                println("Parent Finish Code (Tapi belum mati)")
+            }
+
+            parentJob.join()
+            println("Semua selesai : ${Date()}")
+        }
+    }
+
+    @Test
+    fun testParentCancel() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            val parentJob = launch {
+                println("Parent Start")
+
+                launch {
+                    try {
+                        println("Child 1 Start")
+                        delay(5000) // Child lama
+                        println("Child 1 End")
+                    } catch (e: CancellationException) {
+                        println("Child 1 Kena Cancel! : $e")
+                    }
+                }
+
+                launch {
+                    try {
+                        println("Child 2 Start")
+                        delay(5000) // Child lama
+                        println("Child 2 End")
+                    } catch (e: CancellationException) {
+                        println("Child 2 Kena Cancel! : $e")
+                    }
+                }
+            }
+
+            delay(1000) // Biarkan berjalan selama 1 detik (proses child 5 detik)
+            println("Membatalkan parent...")
+            parentJob.cancel()
+            parentJob.join()
+        }
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    @Test
+    fun testJobParentChild() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            // Membuat instance Parent Job manual
+            val masterJob = Job()
+
+            // Membuat scope dengan Parent Job
+            // Semua coroutine yang lahir dari sini akan otomatis menjadi Child Job dari Master Job
+            val scope = CoroutineScope(context = Dispatchers.IO)
+
+            scope.launch {
+                println("Child 1 Start")
+                delay(3000)
+                println("Child 1 Done")
+            }
+
+            scope.launch {
+                println("Child 2 Start")
+                delay(3000)
+                println("Child 2 Done")
+            }
+
+            // Membatalkan Master Job (Parent Job)
+            delay(1000)
+            println("Membatalkan Master Job...")
+            masterJob.cancel()
+
+            // child1 dan child2 akan berhenti dan tidak mencetak "Done"
+            masterJob.join() // Menunggu proses pembatalan selesai
+        }
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    @Test
+    fun testBreakingRelationship() {
+        runBlocking {
+            val parentJob = launch {
+                println("Parent Start")
+
+                // MASALAH: Mengirimkan Job() baru sebagai context
+                // Akibatnya: Coroutine ini BUKAN anak dari parentJob
+                // Dia menjadi "Anak Tiri" yang punya Job sendiri
+                launch(Job()) {
+                    println("Child (Independent) Start")
+                    delay(3000)
+                    println("Child (Independent) Done") // Ini akan tetap jalan walau parent mati
+                }
+            }
+
+            delay(1000)
+            println("Membatalkan Parent...")
+            parentJob.cancel() // Cancel parent
+
+            delay(3000) // Menunggu pembuktian
+        }
+    }
+
+    @Test
+    fun testCancelChildren() {
+        println("START PROGRAM  | ${Date()}")
+        runBlocking {
+            // 1. Membuat Parent Job dan Scope
+            val parentJob = Job()
+            val scope = CoroutineScope(Dispatchers.IO + parentJob)
+
+            // 2. Meluncurkan Anak Pertama (Child 1)
+            val child1 = scope.launch {
+                println("Child 1 Start")
+                delay(2000)
+                println("Child 1 Selesai (Tidak akan tercetak)")
+            }
+
+            delay(500) // Biarkan Child 1 jalan sebentar
+
+            // 3. Membatalkan HANYA Anak-anaknya
+            println("Membatalkan semua children...")
+            parentJob.cancelChildren()
+            // parentJob.cancel() <-- Kalau pakai ini, Child 2 di bawah tidak akan jalan!
+
+            // 4. Meluncurkan Anak Kedua (Child 2)
+            // Karena Parent masih hidup, Child 2 BISA jalan
+            val child2 = scope.launch {
+                println("Child 2 Start (Parent masih hidup!)")
+                delay(1000)
+                println("Child 2 Selesai")
+            }
+
+            child2.join() // Menunggu Child 2
+        }
+        println("FINISH PROGRAM | ${Date()}")
     }
 }

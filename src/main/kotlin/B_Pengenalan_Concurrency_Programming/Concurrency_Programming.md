@@ -750,7 +750,7 @@ Untuk mengatasi hal ini, kotlin menyediakan function `async`
 
 - `launch`: Digunakan untuk memulai coroutine yang **tidak mengembalikan hasil** dan mengembalikan
   object **Job**
-- `asycn`: Digunakan untuk memulai coroutine yang **mengembalikan hasil** dan function ini akan
+- `async`: Digunakan untuk memulai coroutine yang **mengembalikan hasil** dan function ini akan
   mengembalikan object `Deferred<T>`
 
 **Deferred**
@@ -1123,6 +1123,7 @@ fun testFinallyError() {
                 println("End Coroutine   :${Date()}")
             } finally {
                 println("Masuk Finally")
+                println("Is Active: $isActive")
                 // Masalah: delay() adalah suspend function.
                 // Karena job sudah di-cancel, delay ini akan langsung gagal (throw error)
                 // dan baris di bawahnya tidak akan tereksekusi.
@@ -1146,10 +1147,12 @@ START PROGRAM  | Sat Feb 14 21:55:07 WIB 2026
 Start Coroutine :Sat Feb 14 21:55:07 WIB 2026
 Membatalkan job...
 Masuk Finally
+Is Active: false
 FINISH PROGRAM | Sat Feb 14 21:55:08 WIB 2026
 ```
 
-Log dalam finally tidak akan pernah dijalankan karena `delay` gagal untuk dieksekusi
+Log dalam finally tidak akan pernah dijalankan karena `delay` gagal untuk dieksekusi karena
+coroutine sudah dibatalkan dan statusnya sudah tidak aktif
 
 **Solusi dengan NonCancellable**
 
@@ -1166,6 +1169,7 @@ fun testNonCancellable() {
             } finally {
                 withContext(context = NonCancellable) {
                     println("Masuk Finally (Non-Cancellable)")
+                    println("Is Active: $isActive")
                     delay(1000)
                     println("Log tetap muncul!")
                 }
@@ -1186,9 +1190,470 @@ START PROGRAM  | Sat Feb 14 21:59:02 WIB 2026
 Start Coroutine :Sat Feb 14 21:59:02 WIB 2026
 Membatalkan job...
 Masuk Finally (Non-Cancellable)
+Is Active: true
 Log tetap muncul!
 FINISH PROGRAM | Sat Feb 14 21:59:04 WIB 2026
 ```
 
 Semua log didalam blok `withContext(NonCancellable)` akan tercetak meskipun Job utamanya sudah
-dibatalkan
+dibatalkan. `withContext()` akan tetap aktif walaupun job utama sudah di cancel
+
+## Coroutine Scope
+
+Sebelumnya `GlobalScope` selalu digunakan untuk menjalankan Coroutine. `GlobalScope` sebenarnya
+adalah salah satu implementasi dari Coroutine Scope
+
+**Coroutine Scope** adalah object yang mengatur **lifecycle** dari coroutine. Function `launch` dan
+`async` yang selama ini digunakan sebenarnya adalah _extension function_ dari class
+**CoroutineScope**
+
+**GlobalScope** tidak disarankan penggunaanya dalam pengembangan aplikasi nyata (production). Karena
+**GlobalScope** memiliki lifecycle yang sama dengan aplikasi. Jika aplikasinya berjalan, coroutine
+didalamnya akan tetap berjalan dan sulit untuk dibatalkan secara spesifik. Jika sebuah _flow_
+proses (misalnya satu layar aplikasi) dibatalkan, idealnya semua coroutine yang terkait dengan layar
+tersebut juga harus mati agar tidak terjadi _memory leak_
+
+Oleh karena itu, praktik yang benar adalah membuat **CoroutineScope** sendiri yang terikat pada
+lifecycle komponen tertentu (misalnya _Activity_ atau _ViewModel_). Saat scope dibatalkan (
+`cancel()`),
+maka semua coroutine yang berjalan di bawah naungan scope tersebut akan **otomatis dibatalkan**
+
+```kotlin
+@Test
+fun testCoroutineScope() {
+    println("START PROGRAM  | ${Date()}")
+
+    // 1. Membuat Scope sendiri
+    //    Scope ini akan menggunakan Dispatcher IO sebagai default contextnya
+    val scope = CoroutineScope(context = Dispatchers.IO)
+
+    // 2. Menjalankan coroutine dalam scope
+    // launch dibawah merupakan milik scope, bukan GlobalScope
+    val job1 = scope.launch(start = CoroutineStart.LAZY) {
+        println("Start Job 1 | ${Date()}")
+        delay(2000)
+        println("End Job 1   | ${Date()}")
+    }
+
+    val job2 = scope.launch(start = CoroutineStart.LAZY) {
+        println("Start Job 2 | ${Date()}")
+        delay(2000)
+        println("End Job 2   | ${Date()}")
+    }
+
+    runBlocking {
+        // Menjalankan Job
+        job1.start()
+        job2.start()
+
+        delay(1000)
+        println("Membatalkan scope...")
+
+        // 3. Membatalkan scope
+        //    Saat scope dibatalkan, job1 dan job2 otomatis akan batal
+        scope.cancel()
+
+        delay(2000) // Menunggu untuk memastikan tidak ada log "End Job"
+    }
+
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sun Feb 15 07:37:56 WIB 2026
+Start Job 1 | Sun Feb 15 07:37:56 WIB 2026
+Start Job 2 | Sun Feb 15 07:37:56 WIB 2026
+Membatalkan scope...
+FINISH PROGRAM | Sun Feb 15 07:37:59 WIB 2026
+```
+
+Hasil eksekusi menunjukan bahwa Log `"End Job"` tidak akan pernah muncul pada kedua job karena scope
+yang menanunginya sudah dibatalkan
+
+### coroutineScope Function
+
+Function `coroutineScope` adalah sebuah _suspend function_ yang digunakan untuk membuat lingkup (
+scope)
+coroutine baru. Fitur utamanya adalah menunggu hingga seluruh coroutine yang dibuat di dalamnya
+selesai dieksekusi, baru kemudian function ini sendiri dianggap selesai
+
+Ini sangat berguna untuk kasus Parallel Decomposition, yaitu memecah satu tugas besar menjadi
+beberapa tugas kecil yang berjalan paralel, namun ingin hasil akhirnya dikembalikan sebagai satu
+kesatuan.
+
+**Key character:**
+
+- **Suspending**: Function ini akan menunda eksekusi function pemanggilnya sampai blok didalamnya
+  tuntas
+- **Error Propagation**: Jika salah satu coroutine didalamnya gagal, maka semua coroutine lain
+  didalam scope ini akan dibatalkan, dan error akan di throw keluar
+
+**Implementasi**
+
+Berikut adalah implementasi untuk mensimulasikan pengambilan dua data secara paralel menggunakan
+coroutineScope. Function `getSum` tidak akan mengembalikan nilai sampai `getFoo` dan `getBar`
+selesai.
+
+```kotlin
+suspend fun getFoo(): Int {
+    delay(1000)
+    return 10
+}
+```
+
+```kotlin
+suspend fun getBar(): Int {
+    delay(1000)
+    return 20
+}
+```
+
+```kotlin
+// Function ini menggunakan coroutineScope untuk memparallelkan proses
+suspend fun getSum(): Int = coroutineScope {
+    println("Mulai hitung...")
+
+    // async berjalan di dalam scope milik 'coroutineScope'
+    val foo = async { getFoo() }
+    val bar = async { getBar() }
+
+    // Menunggu hasil keduanya
+    // Jika salah satu error, getSum akan langsung error (batal)
+    foo.await() + bar.await()
+}
+```
+
+```kotlin
+@Test
+fun testCoroutineScopeFunction() {
+    runBlocking {
+        println("START PROGRAM  | ${Date()}")
+
+        // Memanggil function yang di dalamnya ada parallel process
+        // Baris ini akan suspend selama 1 detik (bukan 2 detik, karena paralel)
+        val result = getSum()
+        println("Hasil : $result")
+
+        println("FINISH PROGRAM | ${Date()}")
+    }
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sun Feb 15 07:50:01 WIB 2026
+Mulai hitung...
+Hasil : 30
+FINISH PROGRAM | Sun Feb 15 07:50:02 WIB 2026
+```
+
+Output waktu akan menunjukkan bahwa `getSum` hanya memakan waktu sekitar 1 detik, membuktikan bahwa
+`getFoo` dan `getBar` berjalan bersamaan di dalam coroutineScope.
+
+## Coroutine Scope Parent & Child
+
+Pada coroutine, terdapat hubungan hierarki (bertingkat) yang otomatis terbentuk saat satu coroutine
+dibuat didalam coroutine lainya
+
+Ketika sebuah coroutine (`Child`) diluncurkan dalam scope coroutine lainya (`Parent`), maka secara
+otomatis:
+
+- **Inheritance** : Child akan mewarisi `Context` dari parent (misalnya Dispatchers), kecuali jika
+  childnya memiliki `context`-nya sendiri
+- **Job** : Job milik Child akan menjadi "anak" dari Job milik Parent
+- **Lifecycle Bound** : Hidup-mati Child bergantung pada Parent
+
+**Tiga hukum utama hubungan parent and child** :
+
+1. **Parent membatalkan child** : Jika parent dicancel maka semua childnya akan otomatis ikut
+   dicancel
+2. **Parent menunggu child** : Parent tidak akan selesai (completed), sampai semua childnya selesai
+   dieksekusi meskipun kode dalam blok parent sudah habis
+3. **Child error mematikan parent** : Jika salah satu child mengalami error (exception), maka parent
+   juga akan ikut error yang mengakibatkan child lainya (saudaranya) akan dibatalkan
+
+### Parent Menunggu Child
+
+```kotlin
+@Test
+fun testParentWaitsForChild() {
+    runBlocking {
+        val parentJob = launch {
+            println("Parent Start  : ${Date()}")
+
+            // Launching child
+            launch {
+                println("Child Start   : ${Date()}")
+                delay(2000) // Child butuh 2 detik
+                println("Child End     : ${Date()}")
+            }
+
+            println("Parent Finish Code (Tapi belum mati)")
+        }
+
+        parentJob.join()
+        println("Semua selesai : ${Date()}")
+    }
+}
+```
+
+Output:
+
+```
+Parent Start  : Sun Feb 15 15:50:31 WIB 2026
+Parent Finish Code (Tapi belum mati)
+Child Start   : Sun Feb 15 15:50:31 WIB 2026
+Child End     : Sun Feb 15 15:50:33 WIB 2026
+Semua selesai : Sun Feb 15 15:50:33 WIB 2026
+```
+
+Parent Start ➜ Child Start ➜ Parent Finish Code (kode parent habis tapi belum lanjut ke end program)
+➜ (Hening menunggu child selesai) ➜ Child End ➜ Semua selesai
+
+Ini membuktikan bahwa Parent bertanggung jawab menunggu anak-anaknya pulang sebelum dia sendiri bisa
+beristirahat.
+
+### Parent Cancel Child
+
+Ini adalah fitur keamanan utama coroutine untuk mencegah memory leak.
+
+```kotlin
+@Test
+fun testParentCancel() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        val parentJob = launch {
+            println("Parent Start")
+
+            launch {
+                try {
+                    println("Child 1 Start")
+                    delay(5000) // Child lama
+                    println("Child 1 End")
+                } catch (e: CancellationException) {
+                    println("Child 1 Kena Cancel! : $e")
+                }
+            }
+
+            launch {
+                try {
+                    println("Child 2 Start")
+                    delay(5000) // Child lama
+                    println("Child 2 End")
+                } catch (e: CancellationException) {
+                    println("Child 2 Kena Cancel! : $e")
+                }
+            }
+        }
+
+        delay(1000) // Biarkan berjalan selama 1 detik (proses child 5 detik)
+        println("Membatalkan parent...")
+        parentJob.cancel()
+        parentJob.join()
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+```
+START PROGRAM  | Sun Feb 15 15:57:24 WIB 2026
+Parent Start
+Child 1 Start
+Child 2 Start
+Membatalkan parent...
+Child 1 Kena Cancel! : kotlinx.coroutines.JobCancellationException: StandaloneCoroutine was cancelled; job="coroutine#2":StandaloneCoroutine{Cancelling}@f0e995e
+Child 2 Kena Cancel! : kotlinx.coroutines.JobCancellationException: StandaloneCoroutine was cancelled; job="coroutine#2":StandaloneCoroutine{Cancelling}@f0e995e
+FINISH PROGRAM | Sun Feb 15 15:57:25 WIB 2026
+```
+
+### Hubungan Antar Job
+
+**CoroutineScope** yang menciptakan hierarki, namun secara teknis, **Job** yang memegang kendali
+
+Dalam `CoroutineContext`, terdapat elemen `Job`, ketika sebuah coroutine dibuat:
+
+1. Ia akan mengambil Job dari context parent (**Parent Job**)
+2. Ia membuat Job baru untuk dirinya sendiri (**Child Job**)
+3. Ia mendaftarkan **Child Job** sebagai anak dari **Parent Job**
+
+**Note**
+
+Hubungan ini dapat dimanipulasi dengan cara mengirimkan instance Job secara manual kedalam context
+
+**Manual Job sebagai Parent**
+
+```kotlin
+@Test
+fun testJobParentChild() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        // Membuat instance Parent Job manual
+        val masterJob = Job()
+
+        // Membuat scope dengan Parent Job
+        // Semua coroutine yang lahir dari sini akan otomatis menjadi Child Job dari Master Job
+        val scope = CoroutineScope(context = Dispatchers.IO)
+
+        scope.launch {
+            println("Child 1 Start")
+            delay(3000)
+            println("Child 1 Done")
+        }
+
+        scope.launch {
+            println("Child 2 Start")
+            delay(3000)
+            println("Child 2 Done")
+        }
+
+        // Membatalkan Master Job (Parent Job)
+        delay(1000)
+        println("Membatalkan Master Job...")
+        masterJob.cancel()
+
+        // child1 dan child2 akan berhenti dan tidak mencetak "Done"
+        masterJob.join() // Menunggu proses pembatalan selesai
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sun Feb 15 16:19:41 WIB 2026
+Child 1 Start
+Child 2 Start
+Membatalkan Master Job...
+FINISH PROGRAM | Sun Feb 15 16:19:42 WIB 2026
+```
+
+Output akan menampilkan "Start" untuk kedua child, lalu "Membatalkan Master Job", dan berhenti.
+Log "Done" tidak akan muncul. Ini membuktikan bahwa masterJob mengontrol nasib anak-anaknya
+
+**Hati-Hati: Memutus Hubungan Orang Tua & Anak**
+
+Salah satu kesalahan umum (bug) adalah secara tidak sengaja memutus hubungan parent-child. Ini
+terjadi jika Anda mendefinisikan Job baru saat meluncurkan coroutine
+
+```kotlin
+@Test
+fun testBreakingRelationship() {
+    runBlocking {
+        val parentJob = launch {
+            println("Parent Start")
+
+            // MASALAH: Mengirimkan Job() baru sebagai context
+            // Akibatnya: Coroutine ini BUKAN anak dari parentJob
+            // Dia menjadi "Anak Tiri" yang punya Job sendiri
+            launch(Job()) {
+                println("Child (Independent) Start")
+                delay(3000)
+                println("Child (Independent) Done") // Ini akan tetap jalan walau parent mati
+            }
+        }
+
+        delay(1000)
+        println("Membatalkan Parent...")
+        parentJob.cancel() // Cancel parent
+
+        delay(3000) // Menunggu pembuktian
+    }
+}
+```
+
+Output:
+
+```
+Parent Start
+Child (Independent) Start
+Membatalkan Parent...
+Child (Independent) Done
+```
+
+Log Child (Independent) Done akan tetap muncul meskipun parent-nya sudah di-cancel. Ini disebut
+**Unstructured Concurrency** dan sangat berbahaya di Android karena bisa menyebabkan memory leak (
+proses
+tetap jalan padahal Activity sudah tutup)
+
+Aturan Emas: Jangan pernah melewatkan `Job()` baru ke parameter `launch` atau `async` kecuali
+benar-benar tahu apa yang dilakukan
+
+### cancelChildren Function
+
+Jika parent dicancel maka childnya juga akan ikut cancel
+
+Untuk membatalkan hanya Child nya saja dapat menggunakan `cancelChildren`
+
+**Implementasi `cancel()` vs `cancelChildren()`**
+
+```kotlin
+@Test
+fun testCancelChildren() {
+    println("START PROGRAM  | ${Date()}")
+    runBlocking {
+        // 1. Membuat Parent Job dan Scope
+        val parentJob = Job()
+        val scope = CoroutineScope(Dispatchers.IO + parentJob)
+
+        // 2. Meluncurkan Anak Pertama (Child 1)
+        val child1 = scope.launch {
+            println("Child 1 Start")
+            delay(2000)
+            println("Child 1 Selesai (Tidak akan tercetak)")
+        }
+
+        delay(500) // Biarkan Child 1 jalan sebentar
+
+        // 3. Membatalkan HANYA Anak-anaknya
+        println("Membatalkan semua children...")
+        parentJob.cancelChildren()
+        // parentJob.cancel() <-- Kalau pakai ini, Child 2 di bawah tidak akan jalan!
+
+        // 4. Meluncurkan Anak Kedua (Child 2)
+        // Karena Parent masih hidup, Child 2 BISA jalan
+        val child2 = scope.launch {
+            println("Child 2 Start (Parent masih hidup!)")
+            delay(1000)
+            println("Child 2 Selesai")
+        }
+
+        child2.join() // Menunggu Child 2
+    }
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Sun Feb 15 16:40:01 WIB 2026
+Child 1 Start
+Membatalkan semua children...
+Child 2 Start (Parent masih hidup!)
+Child 2 Selesai
+FINISH PROGRAM | Sun Feb 15 16:40:02 WIB 2026
+```
+
+Child 1 Start ➜ Membatalkan semua children... (Child 1 mati) ➜ Child 2 Start (Parent masih hidup!)
+(Child 2 berhasil dibuat) ➜ Child 2 Selesai
+
+a
+
+a
+
+a
+
+a
+
+a
+
+a
+
+a
+
+a
