@@ -1642,6 +1642,391 @@ FINISH PROGRAM | Sun Feb 15 16:40:02 WIB 2026
 Child 1 Start ➜ Membatalkan semua children... (Child 1 mati) ➜ Child 2 Start (Parent masih hidup!)
 (Child 2 berhasil dibuat) ➜ Child 2 Selesai
 
+## Memberi nama Coroutine (Debugging Helper)
+
+Saat memiliki banyak coroutine untuk mengerjakan pekerjaan tertentu, proses debugging bisa menjasi
+sulit dengan jumlah coroutine yang sangat banyak dan coroutine mana yang bermasalah
+
+Secara default naming coroutine hanya akan diberi nomor urut `@coroutine#1`, `@coroutine#2`
+
+Untuk memudahkan proses debugging, coroutine dapat diberi nama dengan element context
+`CoroutineName`. Nama ini akan melekat pada thread yang menjalankan coroutine tersebut
+(terlihat di log) dan sangat membantu saat membaca _stack trace error_
+
+```kotlin
+@Test
+fun testCoroutineName() {
+    runBlocking {
+        val scope = CoroutineScope(context = Dispatchers.IO + CoroutineName("Parent-Scope"))
+
+        val job = scope.launch(CoroutineName("First-Child-Job")) {
+            println("Running in thread :${Thread.currentThread().name}")
+
+            val name = coroutineContext[CoroutineName]?.name
+            println("Job name          :$name")
+        }
+
+        val job2 = scope.launch(CoroutineName("Second-Child-Job")) {
+            println("Running in thread :${Thread.currentThread().name}")
+
+            val name = coroutineContext[CoroutineName]?.name
+            println("Job name          :$name")
+        }
+
+        job.join()
+        job2.join()
+    }
+}
+```
+
+Output:
+
+```
+Running in thread :DefaultDispatcher-worker-1 @First-Child-Job#2
+Running in thread :DefaultDispatcher-worker-2 @Second-Child-Job#3
+Job name          :First-Child-Job
+Job name          :Second-Child-Job
+```
+
+## Menggabungkan Context Element
+
+Coroutine Context sebenarnya adalah himpunan data (Collection / Map).
+Karena itu, menggabungkan beberapa elemen context dapat dilakukan dengan operator `+`
+
+**Basic Form : Dispatcher + CoroutineName + Job + ...**
+
+Jika dua element yang memiliki `key` yang sama digabungkan maka element yang kanan akan menimpa
+elemen yang kiri
+
+```kotlin
+@Test
+fun testContextCombination() {
+    runBlocking {
+        val context = Dispatchers.IO + CoroutineName("Test-Network-Call")
+
+        val job = launch(context) {
+            println("Thread : ${Thread.currentThread().name}")
+            println("Name   : ${coroutineContext[CoroutineName]?.name}")
+        }
+
+        job.join()
+    }
+}
+```
+
+Output:
+
+```
+Thread : DefaultDispatcher-worker-1 @Test-Network-Call#2
+Name   : Test-Network-Call
+```
+
+Atau jika ingin membuat thread sendiri :
+
+```kotlin
+@Test
+fun testContextCombination() {
+    val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+    val scope = CoroutineScope(dispatcher + CoroutineName("Test-Network-Call"))
+
+    val job = scope.launch {
+        println("Thread : ${Thread.currentThread().name}")
+        println("Name   : ${coroutineContext[CoroutineName]?.name}")
+    }
+
+    runBlocking {
+        job.join()
+    }
+}
+```
+
+Output:
+
+```
+Thread : pool-1-thread-1 @Test-Network-Call#1
+Name   : Test-Network-Call
+```
+
+## yield Function
+
+Function `yield` berguna untuk "**mengalah**" untuk memberi kesempatan kepada coroutine lain yang
+sedang mengatri di dispatcher yang sama untuk berjalan
+
+Seperti yang sudah dibahas bahwa suspend function sebenarnya berjalan secara sequential jika tidak
+menggunakan async. Jika sebuah suspend function yang panjang dan lama, ada baiknya untuk memberikan
+kesempatan kepada suspend function lain untuk dijalankan
+
+**Kegunaan Utama `yield`**:
+
+1. **Membuat Cooperative Coroutine**
+
+   `yield()` secara otomatis mengecek apakah job dibatalkan (sama seperti `ensureActive()`) dan jika
+   job di-cancel, maka yield juga akan cancel dan melempar `CancellationException`
+
+2. **Pemerataan Eksekusi (Fairness)**
+
+   Jika terdapat 2 coroutine yang berat berjalan bersamaan di thread yang sama, `yield()`
+   memungkinkan mereka berjalan bergantian (interleaving) agar tidak ada satu coroutine yang
+   memonopoli thread
+
+```kotlin
+@Test
+fun testYieldFairness() {
+    println("START PROGRAM  | ${Date()}")
+
+    runBlocking {
+        // Membuat thread agar coroutine berjalan pada thread yang sama
+        val dispatcher = newSingleThreadContext("Thread-Fairness")
+        val scope = CoroutineScope(dispatcher + CoroutineName("Yield-Fairness"))
+
+        val jobA = scope.launch {
+            println("---- Start Job A ---- | ${Thread.currentThread().name}")
+            repeat(5) {
+                println("Job A - Step :$it")
+                yield()
+            }
+            println("----- End Job A ----- | ${Thread.currentThread().name}")
+        }
+
+        val jobB = scope.launch {
+            println("---- Start Job B ---- | ${Thread.currentThread().name}")
+            repeat(5) {
+                println("Job B - Step :$it")
+                yield()
+            }
+            println("----- End Job B ----- | ${Thread.currentThread().name}")
+        }
+
+        joinAll(jobA, jobB)
+    }
+
+    println("FINISH PROGRAM | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM  | Mon Feb 16 07:42:22 WIB 2026
+---- Start Job A ---- | Thread-Fairness @Yield-Fairness#2
+Job A - Step :0
+---- Start Job B ---- | Thread-Fairness @Yield-Fairness#3
+Job B - Step :0
+Job A - Step :1
+Job B - Step :1
+Job A - Step :2
+Job B - Step :2
+Job A - Step :3
+Job B - Step :3
+Job A - Step :4
+Job B - Step :4
+----- End Job A ----- | Thread-Fairness @Yield-Fairness#2
+----- End Job B ----- | Thread-Fairness @Yield-Fairness#3
+FINISH PROGRAM | Mon Feb 16 07:42:22 WIB 2026
+```
+
+Jika baris `yield()` dihapus, maka `jobA` akan selesai 100% baru `jobB` mulai berjalan
+(karena mereka berada di Single Thread)
+
+```
+START PROGRAM  | Mon Feb 16 07:44:33 WIB 2026
+---- Start Job A ---- | Thread-Fairness @Yield-Fairness#2
+Job A - Step :0
+Job A - Step :1
+Job A - Step :2
+Job A - Step :3
+Job A - Step :4
+----- End Job A ----- | Thread-Fairness @Yield-Fairness#2
+---- Start Job B ---- | Thread-Fairness @Yield-Fairness#3
+Job B - Step :0
+Job B - Step :1
+Job B - Step :2
+Job B - Step :3
+Job B - Step :4
+----- End Job B ----- | Thread-Fairness @Yield-Fairness#3
+FINISH PROGRAM | Mon Feb 16 07:44:33 WIB 2026
+```
+
+## awaitCancellation
+
+Secara default coroutine akan berhenti ketika seluruh kode selesai dijalankan
+
+Fuction `awaitCancellation()` adalah _suspend function_ yang digunakan untuk menunda coroutine
+selamanya sampai coroutine tersebut dibatalakan
+
+**Mengapa dibutuhkan function yang tidak melakukan apa-apa**
+
+Biasanya, `awaitCancellation()` digunakan ketika membuat coroutine yang tugasnya hanya menunggu dan
+mendengarkan sesuatu (callback atau listener) yang akan tetap hidup hingga scopenya mati
+
+```kotlin
+@Test
+fun testAwaitCancellation() {
+    println("START PROGRAM    | ${Date()}")
+    runBlocking {
+        val job = launch {
+            try {
+                println("Start Coroutine  - ${Date()}")
+
+                // Coroutine akan BERHENTI DI SINI selamanya...
+                // Tidak memakan CPU (efisien), hanya diam menunggu cancel.
+                awaitCancellation()
+                println("Tidak tercapai") // Unreacable code (Warning)
+            } catch (e: CancellationException) {
+                println("Cancel coroutine - ${e.message}")
+            } finally {
+                println("Cleanup Resource - ${Date()}")
+            }
+        }
+        delay(2000)
+        println("Cancelling Job...")
+        job.cancel(CancellationException("Time to stop"))
+        job.join()
+    }
+    println("FINISH PROGRAM   | ${Date()}")
+}
+```
+
+Output:
+
+```
+START PROGRAM    | Mon Feb 16 22:17:27 WIB 2026
+Start Coroutine  - Mon Feb 16 22:17:27 WIB 2026
+Cancelling Job...
+Cancel coroutine - Time to stop
+Cleanup Resource - Mon Feb 16 22:17:30 WIB 2026
+FINISH PROGRAM   | Mon Feb 16 22:17:30 WIB 2026
+```
+
+## Exception Handling
+
+Materi ini adalah materi yang sangat krusial agar aplikasi tidak crash / force close saat terjadi
+error di background
+
+### Basic Exception Handling
+
+Dalam Kotlin Coroutines, perilaku error (Exception) sangat bergantung pada prinsip
+**"Structured Concurrency"**
+
+**Rules**
+
+Jika sebuah coroutine mengalami error (throw exception) maka:
+
+1. Error akan **disebarluaskan** (**propagate**) ke parentnya
+2. Parent akan membatalkan (`cancel()`) semua childnya (saudara coroutine yang error)
+3. Parent sendiri akan berhenti (`cancel()`)
+4. Akhirnya parent tersebut akan melempar error tersebut ke atas lagi
+
+Artinya, **Satu fatal error pada child terkecil bisa meruntuhkan seluruh struktur coroutine**
+
+**Implikasi kode: Error Domino Effect**
+
+```kotlin
+@Test
+fun testExceptionPropagation() {
+    runBlocking {
+        val parentJob = launch {
+            println("--- Parent Start ---")
+
+            // First Child error
+            launch {
+                println("--- Child1 Start ---")
+                delay(500)
+                println("--- Child1 Error ---")
+                throw RuntimeException("Error simulation in Child 1")
+            }
+
+            // Innocent second child
+            launch {
+                println("--- Child2 Start ---")
+                try {
+                    delay(2000) // Seharusnya jalan selama 2 detik
+                    println("-- Child2  Finish --")
+                } catch (e: CancellationException) {
+                    println("Child2 Impacted from Child1 error : ${e.message}")
+                }
+                println("--- Child2 Error ---")
+            }
+
+            println("---  Parent End  ---")
+        }
+
+        try {
+            parentJob.join()
+        } catch (e: Exception) {
+            // Di unit test/runBlocking, exception akan dilempar ulang
+            println("Parent juga mati karena: ${e.message}")
+        }
+    }
+}
+```
+
+Output:
+
+```
+--- Parent Start ---
+---  Parent End  ---
+--- Child1 Start ---
+--- Child2 Start ---
+--- Child1 Error ---
+Child2 Impacted from Child1 error : Parent job is Cancelling
+--- Child2 Error ---
+Parent juga mati karena: BlockingCoroutine is cancelling
+```
+
+### Perbedaan `launch` dan `async`
+
+Cara error muncul dipermukaan berbeda tergantun builder yang digunakan
+
+1. `launch`: Exception dianggap sebagai **Uncaught Exception**. Ia akan langsung meledak (crash)
+   segera setelah error terjadi. Mirip seperti `Thread.uncaughtExceptionHandler`
+    ```kotlin
+    @Test
+    fun testExceptionInLaunch(){
+        runBlocking {
+            val job = GlobalScope.launch {
+                println("Launch Coroutine")
+                throw IllegalArgumentException()
+            }
+            job.join()
+            println("Finish Coroutine")
+        }
+    }
+    ```
+   Output:
+    ```
+    Launch Coroutine
+    Exception in thread "DefaultDispatcher-worker-1 @coroutine#2"
+    ```
+
+2. `async`:
+    - Jika `async` digunakan **Root** (Top Level), Exception akan disimpan didalam object
+      `Deferred`. Error akan baru muncul saat `await()` dipanggil
+    - **TETAPI**: Jika `async` berada dalam parent lain (Structured Concurrency). Ia akan tetap
+      mematikan parentnya seketika sama seperti `launch`
+      ```kotlin
+      @Test
+      fun testExceptionInAsync() {
+          runBlocking { 
+              val deferred = GlobalScope.async<String> {
+                  println("Launch Coroutine")
+                  throw IllegalArgumentException()
+              }
+      
+              try {
+                  val result = deferred.await()
+                  println("Finish Async $result")
+              } finally {
+                  println("Finally Scope")
+              }
+          }
+      }
+      ```
+
+**Mitos Umum**: "Pakai async saja biar errornya tidak crash dan bisa di try-catch nanti"
+
+**Fakta**: Tidak bisa, kecuali menggunakan **SupervisorJob** (materi selanjutnya). Di dalam scope
+biasa, `async` tetap akan mematikan parent.
 a
 
 a

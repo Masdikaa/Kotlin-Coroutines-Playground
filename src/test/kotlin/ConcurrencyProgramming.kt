@@ -5,12 +5,14 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.cancelChildren
@@ -20,10 +22,12 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import java.util.Date
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
@@ -717,4 +721,191 @@ class ConcurrencyProgramming {
         }
         println("FINISH PROGRAM | ${Date()}")
     }
+
+    @Test
+    fun testCoroutineName() {
+        runBlocking {
+            val scope = CoroutineScope(context = Dispatchers.IO + CoroutineName("Parent-Scope"))
+
+            val job = scope.launch {
+                println("Running in thread :${Thread.currentThread().name}")
+
+                val name = coroutineContext[CoroutineName]?.name
+                println("Job name          :$name")
+            }
+
+            val job2 = scope.launch(CoroutineName("Second-Child-Job")) {
+                println("Running in thread :${Thread.currentThread().name}")
+
+                val name = coroutineContext[CoroutineName]?.name
+                println("Job name          :$name")
+            }
+
+            job.join()
+            job2.join()
+        }
+    }
+
+    @Test
+    fun testContextCombination() {
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val scope = CoroutineScope(dispatcher + CoroutineName("Test-Network-Call"))
+
+        val job = scope.launch {
+            println("Thread : ${Thread.currentThread().name}")
+            println("Name   : ${coroutineContext[CoroutineName]?.name}")
+        }
+
+        // Thread : pool-1-thread-1 @Test-Network-Call#1
+        // Name   : Test-Network-Call
+
+        runBlocking {
+            job.join()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testYieldFairness() {
+        println("START PROGRAM  | ${Date()}")
+
+        runBlocking {
+            // Membuat thread agar coroutine berjalan pada thread yang sama
+            val dispatcher = newSingleThreadContext("Thread-Fairness")
+            val scope = CoroutineScope(dispatcher + CoroutineName("Yield-Fairness"))
+
+            val jobA = scope.launch {
+                println("---- Start Job A ---- | ${Thread.currentThread().name}")
+                repeat(5) {
+                    println("Job A - Step :$it")
+                    yield()
+                }
+                println("----- End Job A ----- | ${Thread.currentThread().name}")
+            }
+
+            val jobB = scope.launch {
+                println("---- Start Job B ---- | ${Thread.currentThread().name}")
+                repeat(5) {
+                    println("Job B - Step :$it")
+                    yield()
+                }
+                println("----- End Job B ----- | ${Thread.currentThread().name}")
+            }
+
+            joinAll(jobA, jobB)
+        }
+
+        println("FINISH PROGRAM | ${Date()}")
+    }
+
+    suspend fun runJob(number: Int) {
+        println("Start Job $number : ${Thread.currentThread().name}")
+        yield()
+        println("End   Job $number : ${Thread.currentThread().name}")
+    }
+
+    @Test
+    fun testSequentialJob() {
+        val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
+        val scope = CoroutineScope(dispatcher + CoroutineName("testSequentialJob"))
+        runBlocking {
+            scope.launch { runJob(1) }
+            scope.launch { runJob(2) }
+            delay(2000)
+        }
+    }
+
+    @Test
+    fun testAwaitCancellation() {
+        println("START PROGRAM    | ${Date()}")
+        runBlocking {
+            val job = launch {
+                try {
+                    println("Start Coroutine  - ${Date()}")
+
+                    // Coroutine akan BERHENTI DI SINI selamanya...
+                    // Tidak memakan CPU (efisien), hanya diam menunggu cancel.
+                    awaitCancellation()
+                    println("Tidak tercapai") // Unreacable code (Warning)
+                } catch (e: CancellationException) {
+                    println("Cancel coroutine - ${e.message}")
+                } finally {
+                    println("Cleanup Resource - ${Date()}")
+                }
+            }
+            delay(2000)
+            println("Cancelling Job...")
+            job.cancel(CancellationException("Time to stop"))
+            job.join()
+        }
+        println("FINISH PROGRAM   | ${Date()}")
+    }
+
+    @Test
+    fun testExceptionPropagation() {
+        runBlocking {
+            val parentJob = launch {
+                println("--- Parent Start ---")
+
+                // First Child error
+                launch {
+                    println("--- Child1 Start ---")
+                    delay(500)
+                    println("--- Child1 Error ---")
+                    throw RuntimeException("Error simulation in Child 1")
+                }
+
+                // Innocent second child
+                launch {
+                    println("--- Child2 Start ---")
+                    try {
+                        delay(2000) // Seharusnya jalan selama 2 detik
+                        println("-- Child2  Finish --")
+                    } catch (e: CancellationException) {
+                        println("Child2 Impacted from Child1 error : ${e.message}")
+                    }
+                    println("--- Child2 Error ---")
+                }
+
+                println("---  Parent End  ---")
+            }
+
+            try {
+                parentJob.join()
+            } catch (e: Exception) {
+                // Di unit test/runBlocking, exception akan dilempar ulang
+                println("Parent juga mati karena: ${e.message}")
+            }
+        }
+    }
+
+    @Test
+    fun testExceptionInLaunch() {
+        runBlocking {
+            val job = GlobalScope.launch {
+                println("Launch Coroutine")
+                throw IllegalArgumentException()
+            }
+            job.join()
+            println("Finish Coroutine")
+        }
+    }
+
+    @Test
+    fun testExceptionInAsync() {
+        runBlocking {
+            val deferred = GlobalScope.async<String> {
+                println("Launch Coroutine")
+                throw IllegalArgumentException()
+            }
+
+            try {
+                val result = deferred.await()
+                println("Finish Async $result")
+            } finally {
+                println("Finally Scope")
+            }
+        }
+    }
+
 }
