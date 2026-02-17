@@ -1,4 +1,5 @@
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -9,6 +10,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -24,6 +26,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -908,4 +911,130 @@ class ConcurrencyProgramming {
         }
     }
 
+    @Test
+    fun testExceptionHandler() {
+        runBlocking {
+            println("---- Start  Program ----")
+
+            // Membuat exception handler
+            val exceptionHandler = CoroutineExceptionHandler { context, exception ->
+                println("Caught Error pada Context: \n$context \n${exception.message}")
+            }
+
+            // Memasang handler pada scope (Root)
+            val scope = CoroutineScope(Dispatchers.IO + exceptionHandler)
+
+            val job = scope.launch {
+                println("Start Coroutine")
+                // Error ini tidak di-try-catch manual
+                throw RuntimeException("Ups, Fatal Error")
+            }
+
+            job.join()
+            println("---- Finish Program ----") // Tidak crash
+        }
+    }
+
+    @Test
+    fun testSupervisorJob() {
+        runBlocking {
+            // Exception handler agar error child rapi dan tidak crash test
+            val handler = CoroutineExceptionHandler { _, exception ->
+                println("Handler menangkap error: ${exception.message}")
+            }
+
+            // Membuat scope dengan Supervisor Job
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+
+            val job1 = scope.launch {
+                println("Child 1 Start")
+                delay(1000)
+                throw RuntimeException("Fail simulation on Child 1")
+            }
+
+            val job2 = scope.launch {
+                println("Child 2 Start")
+                delay(2000)
+                println("Finish Child 2")
+            }
+
+            joinAll(job1, job2)
+        }
+    }
+
+    @Test
+    fun testSupervisorScope() {
+        runBlocking {
+            supervisorScope {
+                // Child 1: Error
+                launch {
+                    println("Child 1 Start")
+                    delay(500)
+                    println("Child 1 Error!")
+                    // Error ini TIDAK akan membatalkan Child 2
+                    throw RuntimeException("Error di Child 1")
+                }
+
+                // Child 2: Sukses
+                launch {
+                    println("Child 2 Start")
+                    delay(1000)
+                    println("Child 2 Selesai (Tetap hidup)")
+                }
+            }
+            // supervisorScope selesai setelah SEMUA child selesai (baik sukses maupun error)
+            println("Scope Selesai")
+        }
+    }
+
+    @Test // Bad Implementation
+    fun testRegularJob_HandlerIgnored() {
+        val handler = CoroutineExceptionHandler { _, exception ->
+            println("Menangkap Error: ${exception.message}")
+        }
+        val dispatcher = Executors.newFixedThreadPool(10).asCoroutineDispatcher()
+
+        val scope = CoroutineScope(dispatcher)
+
+        runBlocking {
+            val job = scope.launch {
+                println("Job 0 - Parent")
+                launch(handler) {
+                    println("Job 1 - Child")
+                    throw RuntimeException("Error di child job")
+                }
+            }
+
+            job.join()
+        }
+    }
+
+    @Test // Best Implementation
+    fun testSupervisorJob_HandlerWorks() {
+        val handler = CoroutineExceptionHandler { _, exception ->
+            println("Menangkap Error: ${exception.message}")
+        }
+
+        val dispatcher = Executors.newFixedThreadPool(10).asCoroutineDispatcher()
+
+        // Scope menggunakan supervisor job
+        val scope = CoroutineScope(dispatcher + SupervisorJob())
+
+        runBlocking {
+            val job = scope.launch {
+                println("Parent Job")
+                supervisorScope {
+                    launch(handler) {
+                        println("Child Job")
+                        throw RuntimeException("Error di Supervisor Job")
+                    }
+                }
+            }
+
+            job.join()
+            // HASIL: "HANDLER MENANGKAP: Error di Supervisor Job" akan muncul.
+            // Karena Supervisor menyuruh anak ngurus errornya sendiri,
+            // maka handler di anak jadi berguna.
+        }
+    }
 }

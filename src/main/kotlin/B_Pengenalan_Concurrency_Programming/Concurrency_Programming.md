@@ -2026,7 +2026,232 @@ Cara error muncul dipermukaan berbeda tergantun builder yang digunakan
 **Mitos Umum**: "Pakai async saja biar errornya tidak crash dan bisa di try-catch nanti"
 
 **Fakta**: Tidak bisa, kecuali menggunakan **SupervisorJob** (materi selanjutnya). Di dalam scope
-biasa, `async` tetap akan mematikan parent.
+biasa, `async` tetap akan mematikan parent
+
+### Coroutine Exception Handler
+
+`CoroutineExceptionHandler` adalah elemen context sama seperti Dispatcher/Job yang berfungsi sebagai
+pengaman untuk menangkap **Uncaught Exceptions**
+
+**Rules**
+
+1. **Hanya efektif di Root Coroutine**
+
+   Handler ini hanya akan bekerja jika dipasang pada coroutine paling atas (Main Parent) atau pada
+   Scope. Memasangnya pada child coroutine tidak akan berdampak apapun karena child selalu melempar
+   error ke parent-nya
+
+2. **Hanya untuk `launch` (bukan `async`)**
+
+   Seperti yang dibahas sebelumnya bahwa async menyimpan error dalam object `Deferred` dan tidak
+   menangkap error
+
+```kotlin
+@Test
+fun testExceptionHandler() {
+    runBlocking {
+        println("---- Start  Program ----")
+
+        // Membuat exception handler
+        val exceptionHandler = CoroutineExceptionHandler { context, exception ->
+            println("Caught Error pada Context: \n$context \n${exception.message}")
+        }
+
+        // Memasang handler pada scope (Root)
+        val scope = CoroutineScope(Dispatchers.IO + exceptionHandler)
+
+        val job = scope.launch {
+            println("Start Coroutine")
+            // Error ini tidak di-try-catch manual
+            throw RuntimeException("Ups, Fatal Error")
+        }
+
+        job.join()
+        println("---- Finish Program ----") // Tidak crash
+    }
+}
+```
+
+Output:
+
+```
+---- Start  Program ----
+Start Coroutine
+Caught Error pada Context: 
+[ConcurrencyProgramming$testExceptionHandler$1$invokeSuspend$$inlined$CoroutineExceptionHandler$1@1755f767, CoroutineId(2), "coroutine#2":StandaloneCoroutine{Cancelling}@1cf050fa, Dispatchers.IO] 
+Ups, Fatal Error
+---- Finish Program ----
+```
+
+## Supervisor Job
+
+Ingat, jika child job mengalami error, error akan di propagate ke atas (parent) dan keatasnya lagi
+serta berimplikasi pada child lainya yang juga akan melempar error
+
+**SupervisorJob** adalah solusi dari permasalahan diatas
+
+SupervisorJob adalah varian job yang bersifat **Independen**. Jika Job biasa bersifat "Satu Sakit,
+Semua Sakit", maka SupervisorJob bersifat "Satu Sakit, Yang Lain Tetap Sehat"
+
+**Karakteristik:**
+
+1. **Children Fail Independently**
+
+   Jika salah satu child coroutine mengalami error (exception), SupervisorJob **TIDAK AKAN**
+   membatalkan
+   dirinya sendiri, dan **TIDAK AKAN** membatalkan anak-anaknya yang lain.
+
+2. **Firewall**
+
+   Ia bertindak seolah-olah sebagai tembok api yang mencegah penyebaran error
+
+**Implementasi:**
+
+```kotlin
+@Test
+fun testSupervisorJob() {
+    runBlocking {
+        // Exception handler agar error child rapi dan tidak crash test
+        val handler = CoroutineExceptionHandler { _, exception ->
+            println("Handler menangkap error: ${exception.message}")
+        }
+
+        // Membuat scope dengan Supervisor Job
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+
+        val job1 = scope.launch {
+            println("Child 1 Start")
+            delay(1000)
+            throw RuntimeException("Fail simulation on Child 1")
+        }
+
+        val job2 = scope.launch {
+            println("Child 2 Start")
+            delay(2000)
+            println("Finish Child 2")
+        }
+
+        joinAll(job1, job2)
+    }
+}
+```
+
+Output:
+
+```
+Child 1 Start
+Child 2 Start
+Handler menangkap error: Fail simulation on Child 1
+Finish Child 2
+```
+
+Hasil eksekusi menunjukan Child 2 tidak terdampak error dari child 1
+
+### supervisorScope Function
+
+supervisorScope adalah sebuah suspend function yang membuat scope baru. Scope ini menggunakan
+SupervisorJob secara internal
+
+Perbedaan dengan coroutine Scope:
+
+1. `coroutineScope`: Jika salah satu anak error, semua anak lain dibatalkan dan scope itu sendiri
+   error (Solidaritas).
+2. `supervisorScope`: Jika salah satu anak error, anak lain tetap berjalan dan scope tidak batal (
+   Independen).
+
+```kotlin
+@Test
+fun testSupervisorScope() {
+    runBlocking {
+        supervisorScope {
+            // Child 1: Error
+            launch {
+                println("Child 1 Start")
+                delay(500)
+                println("Child 1 Error!")
+                // Error ini TIDAK akan membatalkan Child 2
+                throw RuntimeException("Error di Child 1")
+            }
+
+            // Child 2: Sukses
+            launch {
+                println("Child 2 Start")
+                delay(1000)
+                println("Child 2 Selesai (Tetap hidup)")
+            }
+        }
+        // supervisorScope selesai setelah SEMUA child selesai (baik sukses maupun error)
+        println("Scope Selesai")
+    }
+}
+```
+
+Output:
+
+```
+Child 1 Start
+Child 2 Start
+Child 1 Error!
+Exception in thread "Test worker @coroutine#2".......
+Child 2 Selesai (Tetap hidup)
+Scope Selesai
+```
+
+## Exception Handling pada di Job vs Supervisor Job
+
+Ini adalah detail teknis yang sering membuat bingung, tapi sangat penting untuk dipahami agar error
+handler benar-benar berfungsi
+
+**Basic Rules**
+
+Coroutine Exception Handler hanya dijalankan oleh "Root Coroutine" (Coroutine Akar/Induk)
+
+Namun, definisi "**Siapa Akar-nya?**" berubah tergantung jenis Job yang dipakai:
+
+1. Regular Job (Anak Manja):
+    - Semua anak wajib lapor ke orang tua jika ada error
+    - Orang tua yang bertanggung jawab menangani error tersebut
+    - Akibatnya: Handler yang dipasang di Anak (Child) akan DIABAIKAN. Handler harus dipasang di
+      Parent.
+
+2. Supervisor Job (Anak Mandiri):
+    - Orang tua masa bodoh (tidak peduli) jika anak error
+    - Anak dipaksa menangani errornya sendiri
+    - Akibatnya: Anak dianggap sebagai "Root" bagi dirinya sendiri. Handler yang dipasang di Anak (
+      Child) akan BERFUNGSI.
+
+Implementasi anak manja
+
+```kotlin
+@Test // Bad Implementation
+fun testRegularJob_HandlerIgnored() {
+    val handler = CoroutineExceptionHandler { _, exception ->
+        println("Menangkap Error: ${exception.message}")
+    }
+
+    runBlocking {
+        // Parent adalah JOB BIASA bukan Supervisor Job
+        val scope = CoroutineScope(Job())
+
+        // Pasang handler di child dari scope
+        val job = scope.launch(handler) {
+            throw RuntimeException("Error di Job Biasa")
+        }
+
+        job.join()
+        // HASIL: Handler TIDAK AKAN jalan.
+        // Error akan dianggap "Uncaught" dan bisa bikin crash (di Android real).
+        // Di unit test, ini mungkin hanya print stack trace merah.
+    }
+}
+```
+
+Output:
+
+```
+
+```
+
 a
 
 a
