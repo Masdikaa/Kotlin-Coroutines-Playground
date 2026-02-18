@@ -2249,8 +2249,312 @@ fun testRegularJob_HandlerIgnored() {
 Output:
 
 ```
+Job 0 - Parent
+Job 1 - Child
+Exception in thread "pool-1-thread-2 @coroutine#3"
+```
+
+**Implementasi Bersih**
+
+```kotlin
+@Test // Best Implementation
+fun testSupervisorJob_HandlerWorks() {
+    val handler = CoroutineExceptionHandler { _, exception ->
+        println("Menangkap Error: ${exception.message}")
+    }
+
+    val dispatcher = Executors.newFixedThreadPool(10).asCoroutineDispatcher()
+
+    // Scope menggunakan supervisor job
+    val scope = CoroutineScope(dispatcher + SupervisorJob())
+
+    runBlocking {
+        val job = scope.launch {
+            println("Parent Job")
+            supervisorScope {
+                launch(handler) {
+                    println("Child Job")
+                    throw RuntimeException("Error di Supervisor Job")
+                }
+            }
+        }
+
+        job.join()
+        // HASIL: "HANDLER MENANGKAP: Error di Supervisor Job" akan muncul.
+        // Karena Supervisor menyuruh anak ngurus errornya sendiri,
+        // maka handler di anak jadi berguna.
+    }
+}
+```
+
+Output:
 
 ```
+Parent Job
+Child Job
+Menangkap Error: Error di Supervisor Job
+```
+
+## Mutex (Mutual Exclusion)
+
+Salah satu fitur di Kotlin Coroutine untuk melakukan proses **Locking**
+
+### Shared Mutable State
+
+Shared Mutable State adalah data yang dapat diubah bersamaan oleh banyak thread\
+Dalam kotlin dianjurkan untuk menggunakan immutable, apalagi jika data tersebut di sharing ke
+beberapa coroutine\
+Namun bagimana jika membutuhkan sharing mutable data pada beberapa coroutine secara sekaligus ?
+
+### Race Condition
+
+Sebelum masuk ke materi solusi, mari pahami permasalahan penggunaan shared mutable state
+
+Bayangkan kasus berikut:\
+Jika teradapat rekening bang dengan saldo `Rp 0`, dan pengguna melakukan top-up `Rp 1000` sebanyak
+1000
+kali secara bersamaan, berapakah saldo akhirnya ?
+
+Secara matematis, saldo akhir harusnya `Rp 1.000.000`\
+Namun dalam concurrency, hasilnya bisa kacau. Ini kasus yang disebut sebagai race condition
+
+```kotlin
+@Test
+fun testRaceCondition() {
+    var saldo = 0 // Shared Mutable State (Data yang diperebutkan)
+
+    runBlocking {
+        println("Saldo Awal  : $saldo")
+
+        val jobs = List(1000) {
+            // Menjalankan 1000 Coroutine secara paralel
+            GlobalScope.launch(Dispatchers.Default) {
+                repeat(1000) {
+                    saldo++
+                }
+            }
+        }
+
+        jobs.joinAll() // Tunggu semua job selesai
+        println("Saldo Akhir : $saldo")
+    }
+}
+```
+
+Output:
+
+```
+Saldo Awal  : 0
+Saldo Akhir : 271136
+```
+
+Kenapa hasilnya tidak sesuai, karena dilai saldo akan diakses oleh banyak thread dan ditambahkan
+secara parallel dan tidak berurutan
+
+Operasi `saldo++` sebenarnya terdiri dari 3 langkah komputer:
+
+- Baca nilai saldo saat ini (misal 10).
+
+- Tambah 1 (jadi 11).
+
+- Simpan balik ke saldo.
+
+Jika dua thread membaca nilai 10 secara bersamaan, keduanya akan menulis 11. Padahal harusnya yang
+satu menulis 11, yang berikutnya menulis 12. Satu penambahan pun "hilang"
+
+### Solusi (Mutex)
+
+Mutex adalah singkatan dari Mutual Exclusion adalah mekanisme locking (penguncian)
+
+- Jika Thread A masuk dan mengunci pintu
+- Maka Thread B harus mengunggu diluar (suspend) sampai Thread A keluar
+
+Pada kotlin coroutine mutex biasa menggunakan `Mutex.lock()`, `unlock()` atau yang lebih aman
+`withLock {...}`
+
+```kotlin
+@Test
+fun testMutex() {
+    var saldo = 0
+    val mutex = Mutex() // Membuat object mutex sebagai kunci
+
+    runBlocking {
+        println("Saldo Awal  : $saldo")
+
+        val jobs = List(1000) {
+            GlobalScope.launch(Dispatchers.Default) {
+                repeat(1000) {
+                    // CRITICAL SECTION (Daerah Rawan)
+                    // Kita kunci agar cuma 1 coroutine yang boleh masuk sini
+                    mutex.withLock {
+                        saldo++
+                    }
+                }
+            }
+        }
+
+        jobs.joinAll()
+        println("Saldo Akhir : $saldo { Aman }")
+    }
+}
+```
+
+Output:
+
+```
+Saldo Awal  : 0
+Saldo Akhir : 1000000 { Aman }
+```
+
+## Semaphore
+
+Semaphore memiliki fungsi yang sama dengan Mutex, jika dengan mutex hanya terdapat 1 Coroutine yang
+dapat akses ke **Shared Mutable State**\
+Dengan **Semaphore**, jumlah coroutine yang dapat mengakses Shared Mutable State dapat ditentukan
+
+Secara konsep Semaphore digunakan untuk membatasi jumlah Coroutine dalam mengakses Shared Mutable
+State (Resource)
+
+Dalam Kotlin Coroutine, Semaphore dapat diaplikasikan dengan `Semaphore(value: Int)` \
+`value` disini adalah variable Int yang menentukan berapa banyak _permit_ yang tersedia
+
+```kotlin
+@Test
+fun testSemaphore() {
+    val dispatcher = Executors.newFixedThreadPool(10).asCoroutineDispatcher()
+    val scope = CoroutineScope(dispatcher)
+    val semaphore = Semaphore(permits = 2) // Tiket masuk yang tersedia
+
+    runBlocking {
+        repeat(10) {
+            scope.launch {
+                semaphore.withPermit {
+                    println("Coroutine $it masuk   : ${Date()} ${Thread.currentThread().name}")
+                    delay(1000)
+                    println("Coroutine $it selesai : ${Date()} ${Thread.currentThread().name}")
+                }
+            }
+        }
+
+        delay(10000)
+    }
+}
+```
+
+Output:
+
+```
+Coroutine 1 masuk   : Wed Feb 18 22:01:04 WIB 2026 pool-1-thread-2 @coroutine#3
+Coroutine 0 masuk   : Wed Feb 18 22:01:04 WIB 2026 pool-1-thread-1 @coroutine#2
+Coroutine 1 selesai : Wed Feb 18 22:01:05 WIB 2026 pool-1-thread-9 @coroutine#3
+Coroutine 0 selesai : Wed Feb 18 22:01:05 WIB 2026 pool-1-thread-8 @coroutine#2
+Coroutine 6 masuk   : Wed Feb 18 22:01:05 WIB 2026 pool-1-thread-10 @coroutine#8
+Coroutine 3 masuk   : Wed Feb 18 22:01:05 WIB 2026 pool-1-thread-4 @coroutine#5
+Coroutine 6 selesai : Wed Feb 18 22:01:06 WIB 2026 pool-1-thread-3 @coroutine#8
+Coroutine 3 selesai : Wed Feb 18 22:01:06 WIB 2026 pool-1-thread-5 @coroutine#5
+Coroutine 8 masuk   : Wed Feb 18 22:01:06 WIB 2026 pool-1-thread-6 @coroutine#10
+Coroutine 5 masuk   : Wed Feb 18 22:01:06 WIB 2026 pool-1-thread-7 @coroutine#7
+Coroutine 8 selesai : Wed Feb 18 22:01:07 WIB 2026 pool-1-thread-1 @coroutine#10
+Coroutine 5 selesai : Wed Feb 18 22:01:07 WIB 2026 pool-1-thread-2 @coroutine#7
+Coroutine 7 masuk   : Wed Feb 18 22:01:07 WIB 2026 pool-1-thread-1 @coroutine#9
+Coroutine 4 masuk   : Wed Feb 18 22:01:07 WIB 2026 pool-1-thread-9 @coroutine#6
+Coroutine 7 selesai : Wed Feb 18 22:01:08 WIB 2026 pool-1-thread-10 @coroutine#9
+Coroutine 4 selesai : Wed Feb 18 22:01:08 WIB 2026 pool-1-thread-4 @coroutine#6
+Coroutine 2 masuk   : Wed Feb 18 22:01:08 WIB 2026 pool-1-thread-6 @coroutine#4
+Coroutine 9 masuk   : Wed Feb 18 22:01:08 WIB 2026 pool-1-thread-7 @coroutine#11
+Coroutine 2 selesai : Wed Feb 18 22:01:09 WIB 2026 pool-1-thread-3 @coroutine#4
+Coroutine 9 selesai : Wed Feb 18 22:01:09 WIB 2026 pool-1-thread-5 @coroutine#11
+```
+
+Amati pada output, coroutine yang dapat mengakses shared resource (`it` dalam repeat) hanya dibatasi
+2 coroutine dari 10, terlihat pada output bahwa pasti selalu ada ID yang masuk bersamaan
+
+## Kotlin Flow
+
+Flow adalah class Kotlin yang menangani aliran data (**Data Stream**)
+
+Contoh:\
+Seperti Foto dan Video
+
+- `suspend` bersifat seperti data foto: Data diminta, menunggu proses, lalu didapatkan hasil utuh
+  dari foto
+- **Flow** lebih seperti video stream: Data diminta, lalu gambar frame satu persatu akan datang
+  terus menerus seringin berjalanya waktu
+
+**Flow** memiliki konsep yang hampir mirip dengan **List**\
+Perbedaanya adalah :
+
+1. **List<Int>**\
+   Semua data harus ada dan disimpan dalam memory terlebih dahulu, baru dikembalikan
+   (Blocking/Heavy Memory)
+
+2. **Flow<Int>**\
+   Data dihitung dan dikirim satu persatu (Asynchronous/Lazy)
+
+### Cold Stream Concept
+
+Konsep ini berarti kode didalam `Flow{...}` **TIDAK AKAN BERJALAN** sampai ada yang memanggil dan
+mengumpulkanya (`collect()`)
+
+### FLow Example
+
+Flow memiliki **Producer** dan **Consumer**
+
+```kotlin
+// Membuat flow (producer) -> Tidak suspend dan langsung mengembalikan object Flow
+fun numberFlow(): Flow<Int> = flow {
+    println("Start Flow...")
+    for (i in 1..5) {
+        delay(1000)
+        emit(i) // Kirim/Emit data ke pemanggil
+    }
+}
+
+@Test
+fun testIntroductionFlow() {
+    runBlocking {
+        println("Memanggil Function Flow....")
+        val flow = numberFlow()
+        println("Flow sudah dibuat (belum dijalankan)")
+
+        // Menjalankan flow (Consumer)
+        println("Mulai Collect")
+        flow.collect { value ->
+            println("Menerima data: $value | ${Date()}")
+        }
+        println("Finish")
+    }
+}
+```
+
+Output:
+
+```
+Memanggil Function Flow....
+Flow sudah dibuat (belum dijalankan)
+Mulai Collect
+Start Flow...
+Menerima data: 1 | Wed Feb 18 22:58:21 WIB 2026
+Menerima data: 2 | Wed Feb 18 22:58:22 WIB 2026
+Menerima data: 3 | Wed Feb 18 22:58:23 WIB 2026
+Menerima data: 4 | Wed Feb 18 22:58:24 WIB 2026
+Menerima data: 5 | Wed Feb 18 22:58:25 WIB 2026
+Finish
+```
+
+Dari output dapat dilihat bahwa data yang dicollect dari flow akan dirikim terus menerus seiring
+waktu sampai data habis atau berhenti di collect
+
+### Flow better than List
+
+Jika dalam kasus memproses 1000 data dari database
+
+- **List**\
+  Aplikasi harus memuat 1.000 data ke RAM sekaligus, baru ditampilkan. Jika HP kentang, aplikasi
+  force close (OOM)
+- **Flow**\
+  Aplikasi mengambil data ke-1, kirim ke UI, hapus dari RAM. Ambil data ke-2, kirim, hapus. RAM
+  tetap lega meskipun datanya jutaan
 
 a
 

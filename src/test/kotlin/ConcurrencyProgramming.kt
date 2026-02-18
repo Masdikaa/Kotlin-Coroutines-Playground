@@ -21,12 +21,18 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1035,6 +1041,98 @@ class ConcurrencyProgramming {
             // HASIL: "HANDLER MENANGKAP: Error di Supervisor Job" akan muncul.
             // Karena Supervisor menyuruh anak ngurus errornya sendiri,
             // maka handler di anak jadi berguna.
+        }
+    }
+
+    @Test
+    fun testRaceCondition() {
+        var saldo = 0 // Shared Mutable State (Data yang diperebutkan)
+
+        runBlocking {
+            println("Saldo Awal  : $saldo")
+
+            val jobs = List(1000) {
+                // Menjalankan 1000 Coroutine secara paralel
+                GlobalScope.launch(Dispatchers.Default) {
+                    repeat(1000) {
+                        saldo++
+                    }
+                }
+            }
+
+            jobs.joinAll() // Tunggu semua job selesai
+            println("Saldo Akhir : $saldo")
+        }
+    }
+
+    @Test
+    fun testMutex() {
+        var saldo = 0
+        val mutex = Mutex() // Membuat object mutex sebagai kunci
+
+        runBlocking {
+            println("Saldo Awal  : $saldo")
+
+            val jobs = List(1000) {
+                GlobalScope.launch(Dispatchers.Default) {
+                    repeat(1000) {
+                        // CRITICAL SECTION (Daerah Rawan)
+                        // Kita kunci agar cuma 1 coroutine yang boleh masuk sini
+                        mutex.withLock {
+                            saldo++
+                        }
+                    }
+                }
+            }
+
+            jobs.joinAll()
+            println("Saldo Akhir : $saldo { Aman }")
+        }
+    }
+
+    @Test
+    fun testSemaphore() {
+        val dispatcher = Executors.newFixedThreadPool(10).asCoroutineDispatcher()
+        val scope = CoroutineScope(dispatcher)
+        val semaphore = Semaphore(permits = 2) // Tiket masuk yang tersedia
+
+        runBlocking {
+            repeat(10) {
+                scope.launch {
+                    semaphore.withPermit {
+                        println("Coroutine $it masuk   : ${Date()} ${Thread.currentThread().name}")
+                        delay(1000)
+                        println("Coroutine $it selesai : ${Date()} ${Thread.currentThread().name}")
+                    }
+                }
+            }
+
+            delay(10000)
+        }
+    }
+
+    // Membuat flow (producer) -> Tidak suspend dan langsung mengembalikan object Flow
+    fun numberFlow(): Flow<Int> = flow {
+        println("Start Flow...")
+        for (i in 1..5) {
+            delay(1000)
+            emit(i) // Kirim/Emit data ke pemanggil
+        }
+    }
+
+    @Test
+    fun testIntroductionFlow() {
+        runBlocking {
+            println("Memanggil Function Flow....")
+            val flow = numberFlow()
+            println("Flow sudah dibuat (belum dijalankan)")
+
+            // Menjalankan flow (Consumer)
+            println("Mulai Collect")
+            flow.collect { value ->
+                println("Menerima data: $value | ${Date()}")
+            }
+            println("Finish")
         }
     }
 }
