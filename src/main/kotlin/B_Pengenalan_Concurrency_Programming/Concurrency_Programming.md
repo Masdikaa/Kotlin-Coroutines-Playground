@@ -2556,18 +2556,394 @@ Jika dalam kasus memproses 1000 data dari database
   Aplikasi mengambil data ke-1, kirim ke UI, hapus dari RAM. Ambil data ke-2, kirim, hapus. RAM
   tetap lega meskipun datanya jutaan
 
-a
+### Flow Operator
 
-a
+Sama seperti dengan Kotlin Collection, Flow memiliki banyak jenis operator seperti `map`, `flatMap`,
+`filter`, `reduce`, dan lain-lain
 
-a
+**Jenis Operator Flow**
 
-a
+1. Intermediate Operator (Operator Perantara)
+    - Bertugas untuk memanipulasi Flow dan mengembalikan Flow baru
+    - Bersifat Cold/Lazy, menanggil operator ini tidak akan menjalankanya
+    - `map`, `filter`, `take`, `transform`
 
-a
+2. Terminal Operator (Operator Akhir)
+    - Bertugas untuk memulai eksekusi Flow dan mengembalikan hasil akhir (Bukan return flow) atau
+      hanya sekedar menyelesaikan stream
+    - Bersifat `suspending`, disinilah pengambilan data benar benar terjadi
+    - `collect`, `toList`, `first`, `reduce`
 
-a
+**Implementasi Flow Operator : Intermediate Operator**
 
-a
+```kotlin
+@Test
+fun testFlowOperator() {
+    runBlocking {
+        val numberFlow = flowOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        println("Arranging operator pipeline")
+        numberFlow
+            .filter { number ->
+                println("Filtering number : $number")
+                number % 2 == 0
+            }
+            .map { evenNumber ->
+                println("Mapping number   : $evenNumber")
+                "Final output : ${evenNumber * 10}"
+            }
+            .collect { result ->
+                println(result)
+            }
+    }
+}
+```
 
-a
+Output:
+
+```
+Arranging operator pipeline
+Filtering number : 1
+Filtering number : 2
+Mapping number   : 2
+Final output : 20
+Filtering number : 3
+Filtering number : 4
+Mapping number   : 4
+Final output : 40
+Filtering number : 5
+Filtering number : 6
+Mapping number   : 6
+Final output : 60
+Filtering number : 7
+Filtering number : 8
+Mapping number   : 8
+Final output : 80
+Filtering number : 9
+Filtering number : 10
+Mapping number   : 10
+Final output : 100
+```
+
+**Analisa**\
+Perhatikan urutan output, Flow akan memproses data secara berurutan satu persatu dari atas ke bawah
+melewati seluruh pipe, bukan memproses semua data di `filter` dulu baru masuk ke `map`\
+Ini yang membuat Flow hemat memory
+
+**Implementasi Flow Operator : Terminal Operator**
+
+**Karakteristik Terminal Operator**
+
+- Bersifat Suspend, Menahan eksekusi coroutine sampai proses Flow data selesai.
+- Tidak mengembalikan Flow, Terminal operator menghasilkan nilai tunggal sebuah collection atau Unit
+
+**Jenis Umum Terminal Operator**
+
+- `toList()` / `toSet()`: Mengumpulkan semua data dalam bentuk **List** atau **Set**
+- `first()` : Mengambil data pertama yang di emit, lalu langsung membatalkan sisa Flow
+- `single()`: Mirip `first()`, tapi ia memastikan bahwa Flow hanya memancarkan tepat satu nilai.
+  Jika
+  lebih atau kosong, ia akan melempar Exception
+- `reduce()` / `fold()`: Menggabungkan seluruh data yang memancar menjadi satu nilai akhir (misal:
+  menjumlahkan seluruh angka)
+
+```kotlin
+@Test
+fun testFlowOperatorTerminal() {
+    runBlocking {
+        val numberFlow = flowOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+        // toList
+        val listResult = numberFlow.toList()
+        println("List Result  : $listResult")
+
+        // first
+        val firstResult = numberFlow.first()
+        println("First Result : $firstResult")
+
+        // reduce -> Menjumlahkan nilai secara berurutan
+        val sumResult = numberFlow.reduce { accumulator, value ->
+            accumulator + value
+        }
+        println("Sum Result   : $sumResult")
+
+    }
+}
+```
+
+Output:
+
+```
+List Result  : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+First Result : 1
+Sum Result   : 55
+```
+
+### Flow Context and `flowOn` Function (Context Preservation)
+
+Pada materi awal Coroutine, untuk memindahkan thread dari Main Thread ke Background Thread dapat
+dilakukan dengan menggunakan `withContext(Dispatchers.IO)`
+
+Flow memiliki aturan yang disebut **Context Preservation** (Pemeliharaan Konteks)\
+Didalam Flow tidak diizinkan menggunakan `withContext` didalam blok `flow{...}`
+
+**Default Rules pada flow**:\
+Kode di dalam pembuat aliran (`flow { ... }`) akan selalu berjalan di Dispatcher yang sama dengan
+tempat `collect` dipanggil
+
+- Jika `collect` berjalan pada Main Thread, maka flow juga akan berjalan di Main Thread
+
+Permasalahan dari behavior Flow ini adalah jika terdapat kasus dimana memanggil Flow yang memiliki
+proses berat seperti memanggil REST API atau membaca Room DB. Dan `collect` dipanggil pada UI (Main
+Thread). Tentunya aplikasi akan lag/freeze atau bahkan crash (`NetworkOnMainThreadException`)
+
+**`flowOn` as Solution**\
+`flowOn` digunakan untuk mengubah Dispatcher pada Flow\
+`flowOn` akan mengubah context untuk code yang ada di atasnya saja (Upstream), dan membiarkan kode
+dibawahnya (Downstream) tetap berjalan pada context aslinya
+
+```kotlin
+fun getHeavyDataFlow(): Flow<Int> = flow {
+    // UPSTREAM: Bagian ini akan terpengaruh oleh flowOn
+    println("Creating data in thread      : ${Thread.currentThread().name}")
+    delay(1000)
+    emit(100)
+}
+```
+
+```kotlin
+@Test
+fun testFlowOn() {
+    runBlocking { // Running in Test Main Thread (Test Worker)
+        println("Start collect Flow in thread : ${Thread.currentThread().name}")
+
+        getHeavyDataFlow()
+            // Ubah Dispatcher hanya untuk getHeavyDataFlow
+            .flowOn(Dispatchers.IO)
+
+            // DOWNSTREAM -> bagian dibawahnya tidak terpengaruh oleh flowOn
+            // Akan menggunakan thread dari runBlocking
+            .map { data ->
+                println("Mapping data in thread       : ${Thread.currentThread().name}")
+                data * 2
+            }
+            .collect { result ->
+                println("Receiving data in thread     : ${Thread.currentThread().name}")
+                println("Result = $result")
+            }
+
+    }
+}
+```
+
+Output:
+
+```
+Start collect Flow in thread : Test worker @coroutine#1
+Creating data in thread      : DefaultDispatcher-worker-1 @coroutine#2
+Mapping data in thread       : Test worker @coroutine#1
+Receiving data in thread     : Test worker @coroutine#1
+Result = 200
+```
+
+Saat memanggil fungsi yang `getHeavyDataFlow()` yang mengembalikan `Flow<Int>` didalam `runBlocking`
+yang terjadi adalah Upstream dari fungsi tersebut akan dijalankan pada Thread yang berbeda karena
+sudah diubah menggunakan function `flowOn`
+
+Jika **tidak menggunakan** `flowOn` output kode akan terlihat seperti:
+
+```
+Start collect Flow in thread : Test worker @coroutine#1
+Creating data in thread      : Test worker @coroutine#1
+Mapping data in thread       : Test worker @coroutine#1
+Receiving data in thread     : Test worker @coroutine#1
+Result = 200
+```
+
+### Flow Exception Handling
+
+Exception Handling pada Flow sedikit berbeda dengan Coroutine biasa\
+Flow adalah "**pipa**" (aliran data)
+
+Terdapat 2 cara Exception Handling pada flow, basic `try-catch` dan operator `catch`
+
+Prinsip utama Flow disebut dengan **Exception Transparency**\
+_Error selalu mengalir kebawah (Downstream) menuju kolektor (Terminal Operator)_
+
+1. Traditional Approach: `try-catch`\
+   Cara yang paling dasar dalam mengimplementasikan Exception Handling adalah dengan membungkus
+   block `collect` dengan `try-catch`\
+   Membuat Flow:
+   ```kotlin
+    fun simpleFlow(): Flow<Int> = flow {
+        emit(1)
+        emit(2)
+        throw RuntimeException("Disconnected from Databases")
+        emit(3) // Tidak akan pernah terkirim 
+    }
+   ```
+   Menerima Flow:
+   ```kotlin
+   @Test
+   fun testTryCatchExceptionFlow() { 
+       runBlocking { 
+           try {
+               simpleFlow().collect { value ->
+                   println("Accepting value: $value")
+                   // Error disini akan ditangkap oleh try-catch
+               }
+           } catch (e: Exception) {
+               println("Catch error: ${e.message}")
+           } finally {
+               println("Finish")
+           }
+       }
+   }
+   ```
+   Output:
+   ```
+   Accepting value: 1
+   Accepting value: 2
+   Catch error: Disconnected from Databases
+   Finish
+   ```
+
+2. Idiomatic Approach: Operator `catch`:\
+   Operator `catch` hanya menangkap error yang terjadi diatasnya (Upstream) dan tidak akan
+   mengangkap error dibawahnya (Downstream)\
+   Didalam blok catch dapat dilakukan 3 hal:
+    - Emit backup data (**Fallback**)
+    - Melempar ulang error (**Rethrow**)
+    - Hanya mencetak Log
+
+   Membuat Flow
+   ```kotlin
+   fun riskyFlow(): Flow<String> = flow {
+       emit("Data 1")
+       emit("Data 2")
+       throw IllegalArgumentException("Data 3: Corrupted")
+   }
+   ```
+   Menerima Flow
+   ```kotlin
+   @Test
+   fun testCatchOperatorFlow() {
+       runBlocking {
+           riskyFlow()
+               // Menangkap error dari Upstream
+               .catch { e ->
+                   println("LOG: Terjadi error -> ${e.message}")
+                   emit("Default Data") // Fallback error data
+               }
+               .collect { value ->
+                   println("Collect: $value")
+               }
+       }
+   }
+   ```
+   Output:
+   ```
+   Collect: Data 1
+   Collect: Data 2
+   LOG: Terjadi error -> Data 3: Corrupted
+   Collect: Default Data
+   ```
+   Perhatikan bagaimana aplikasi tidak crash, dan `collect` masih menerima "Default Data" sebelum
+   akhirnya Flow benar-benar berhenti
+
+### Cancelable Flow
+
+Flow adalah bagian dari Infrastructure Coroutine. Oleh karena itu aturan pembatalan corutine berlaku
+juga pada Flow\
+Jika coroutine yang mengumpulkan (collect) Flow dibatalkan, maka aliran Flow juga akan otomatis
+berhenti
+
+Ini sangat efisien karena tidak membuang buang memory atau CPU untuk memproses data yang sudah tidak
+ada pendengarnya (collector)
+
+**Detail Teknis**\
+Fungsi pembuat `flow {...}` secara otomatis mengecek status pembatalan (menggunakan
+`ensureActive()`) **setiap kali memanggil** `emit()`
+
+Bagaimana jika flow **tidak memanggil** `emit()` (List yang menggunakan `.asFlow()`). Flow bisa saja
+menolak untuk dibatalkan instan
+
+Untuk menjamin Flow bisa dibatalkan di setiap iterasi, dapat menggunakan operator `.cancellable()`
+
+```kotlin
+fun simpleTimerFlow(): Flow<Int> = flow {
+    for (i in 1..10) {
+        delay(500) // Membuat flow mudah dicancel sebagai simulasi
+        println("Sending number  : $i")
+        emit(i)
+    }
+}
+```
+
+```kotlin
+@Test
+fun testCancelFlow() {
+    runBlocking {
+        val job = launch { // Collector Job
+            simpleTimerFlow().collect { value ->
+                println("Receiving number: $value")
+            }
+        }
+
+        delay(2200) // Biarkan jalan sampai angka ke 4
+        println("Cancelling Collector Job...")
+        job.cancel() // Otomatis mematikan simpleTimerFlow()
+        job.join()
+        println("Finish Program")
+    }
+}
+```
+
+Output:
+
+```
+Sending number  : 1
+Receiving number: 1
+Sending number  : 2
+Receiving number: 2
+Sending number  : 3
+Receiving number: 3
+Sending number  : 4
+Receiving number: 4
+Cancelling Collector Job...
+```
+
+Pada kasus normal Flow, membatalkan flow dapat dilakukan dengan membatalkan Collector Job nya
+
+```kotlin
+@Test
+fun testCancellableOperatorFlow() {
+    runBlocking {
+        val job = launch() {
+            // .asFlow mengubah range menjadi Flow yang sangat cepat (tanpa delay)
+            (1..100).asFlow()
+                .cancellable() // Cancellable ditambahkan agar aman jika job dicancel ditengah jalan
+                .collect { value ->
+                    println("Collect: $value")
+                    if (value == 5) {
+                        println("Self cancelling on number: $value")
+                        cancel() // Membatalkan Coroutine
+                    }
+                }
+        }
+    }
+}
+```
+
+Output:
+
+```
+Collect: 1
+Collect: 2
+Collect: 3
+Collect: 4
+Collect: 5
+Self cancelling on number: 5
+```
+
+JIka Flow berasal dari Collection yang diubah menjadi List dimana flow akan collect secara cepat,
+untuk membatalkanya dapat menggunakan `cancellable()`

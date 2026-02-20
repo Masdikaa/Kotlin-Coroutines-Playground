@@ -22,7 +22,17 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.cancellable
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.reduce
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -1135,4 +1145,164 @@ class ConcurrencyProgramming {
             println("Finish")
         }
     }
+
+    @Test
+    fun testFlowOperatorIntermediate() {
+        runBlocking {
+            val numberFlow = flowOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+            println("Arranging operator pipeline")
+            numberFlow
+                .filter { number ->
+                    println("Filtering number : $number")
+                    number % 2 == 0
+                }
+                .map { evenNumber ->
+                    println("Mapping number   : $evenNumber")
+                    "Final output : ${evenNumber * 10}"
+                }
+                .collect { result ->
+                    println(result)
+                }
+        }
+    }
+
+    @Test
+    fun testFlowOperatorTerminal() {
+        runBlocking {
+            val numberFlow = flowOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+            // toList
+            val listResult = numberFlow.toList()
+            println("List Result  : $listResult")
+
+            // first
+            val firstResult = numberFlow.first()
+            println("First Result : $firstResult")
+
+            // reduce -> Menjumlahkan nilai secara berurutan
+            val sumResult = numberFlow.reduce { accumulator, value ->
+                accumulator + value
+            }
+            println("Sum Result   : $sumResult")
+
+        }
+    }
+
+    fun getHeavyDataFlow(): Flow<Int> = flow {
+        // UPSTREAM: Bagian ini akan terpengaruh oleh flowOn
+        println("Creating data in thread      : ${Thread.currentThread().name}")
+        delay(1000)
+        emit(100)
+    }
+
+    @Test
+    fun testFlowOn() {
+        runBlocking { // Running in Test Main Thread (Test Worker)
+            println("Start collect Flow in thread : ${Thread.currentThread().name}")
+
+            getHeavyDataFlow()
+                // Ubah Dispatcher hanya untuk getHeavyDataFlow
+                .flowOn(Dispatchers.IO)
+
+                // DOWNSTREAM -> bagian dibawahnya tidak terpengaruh oleh flowOn
+                // Akan menggunakan thread dari runBlocking
+                .map { data ->
+                    println("Mapping data in thread       : ${Thread.currentThread().name}")
+                    data * 2
+                }
+                .collect { result ->
+                    println("Receiving data in thread     : ${Thread.currentThread().name}")
+                    println("Result = $result")
+                }
+
+        }
+    }
+
+    fun simpleFlow(): Flow<Int> = flow {
+        emit(1)
+        emit(2)
+        throw RuntimeException("Disconnected from Databases")
+        emit(3) // Tidak akan pernah terkirim
+    }
+
+    @Test
+    fun testTryCatchExceptionFlow() {
+        runBlocking {
+            try {
+                simpleFlow().collect { value ->
+                    println("Accepting value: $value")
+                    // Error disini akan ditangkap oleh try-catch
+                }
+            } catch (e: Exception) {
+                println("Catch error: ${e.message}")
+            } finally {
+                println("Finish")
+            }
+        }
+    }
+
+    fun riskyFlow(): Flow<String> = flow {
+        emit("Data 1")
+        emit("Data 2")
+        throw IllegalArgumentException("Data 3: Corrupted")
+    }
+
+    @Test
+    fun testCatchOperatorFlow() {
+        runBlocking {
+            riskyFlow()
+                // Menangkap error dari Upstream
+                .catch { e ->
+                    println("LOG: Terjadi error -> ${e.message}")
+                    emit("Default Data") // Fallback error data
+                }
+                .collect { value ->
+                    println("Collect: $value")
+                }
+        }
+    }
+
+    fun simpleTimerFlow(): Flow<Int> = flow {
+        for (i in 1..10) {
+            delay(500) // Membuat flow mudah dicancel sebagai simulasi
+            println("Sending number  : $i")
+            emit(i)
+        }
+    }
+
+    @Test
+    fun testCancelFlow() {
+        runBlocking {
+            val job = launch { // Collector Job
+                simpleTimerFlow().collect { value ->
+                    println("Receiving number: $value")
+                }
+            }
+
+            delay(2200) // Biarkan jalan sampai angka ke 4
+            println("Cancelling Collector Job...")
+            job.cancel() // Otomatis mematikan simpleTimerFlow()
+            job.join()
+            println("Finish Program")
+        }
+    }
+
+    @Test
+    fun testCancellableOperatorFlow() {
+        runBlocking {
+            val job = launch() {
+                // .asFlow mengubah range menjadi Flow yang sangat cepat (tanpa delay)
+                (1..100).asFlow()
+                    .cancellable() // Cancellable ditambahkan agar aman jika job dicancel ditengah jalan
+                    .collect { value ->
+                        println("Collect: $value")
+                        if (value == 5) {
+                            println("Self cancelling on number: $value")
+                            cancel() // Membatalkan Coroutine
+                        }
+                    }
+            }
+        }
+    }
+
 }
