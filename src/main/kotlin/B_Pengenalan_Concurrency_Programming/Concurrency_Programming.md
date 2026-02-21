@@ -2947,3 +2947,85 @@ Self cancelling on number: 5
 
 JIka Flow berasal dari Collection yang diubah menjadi List dimana flow akan collect secara cepat,
 untuk membatalkanya dapat menggunakan `cancellable()`
+
+## Practical Flow Implementation (StateFlow and SharedFlow)
+
+Berikut adalah materi dari praktek implementasi flow yang sering terdapat pada Android Development
+yang merupakan **Hot Stream** dari Kotlin Flow
+
+### StateFlow
+
+StateFlow adalah jenis **Hot Flow** yang secara khusus dirancang untuk menyimpan dan memancarkan
+status/data (state) terkini\
+StateFlow merupakan versi modern dari LiveData yang sepenuhnya berjalan di atas Coroutine tanpa
+terikat pada lifecycle Android secara kaku
+
+**Main Characteristic**
+
+- **Initial Value**\
+  Wajib memiliki nilai awal karena sebagai state ia tidak boleh kosong saat pertama kali dibuat
+- **Menyimpan Nilai Terakhir**\
+  Jika ada **collector** baru yang bergabung, ia akan langsung menerima nilai paling mutakhir saat
+  itu
+  juga
+- **Conflated**\
+  **Menghindari Duplikasi**, Jika nilai yang dikirim berturut turut sama persis (misalnya 5, 5, 5),
+  StateFlow hanya akan memancarkan (emit) satu kali dan mengabaikan pembaruan yang tidak merubah
+  state
+
+**Implementasi**
+
+```kotlin
+class CounterScreenViewModel {
+    // 1. Inisialisasi dengan nilai awal (misal: 0)
+    // Gunakan MutableStateFlow agar nilainya bisa diubah dari dalam class ini
+    private val _counterState = MutableStateFlow(0)
+
+    // 2. Ekspos sebagai StateFlow (Read-only) agar dari luar tidak bisa diubah sembarangan
+    val counterState: StateFlow<Int> = _counterState.asStateFlow()
+
+    fun increment() {
+        // 3. Mengubah nilai. Bisa menggunakan .value atau .update (lebih aman untuk concurrency)
+        _counterState.value += 1
+        // _counterState.update { it + 1 }
+    }
+}
+```
+
+### SharedFlow
+
+SharedFlow adalah jenis **Hot Flow** yang sangat fleksibel dan dirancang untuk mengirimkan kejadian
+(**event**) ke satu atau banyak collector sekaligus secara serentak (seperti siaran radio).
+
+**Main Characteristic**
+
+- **Tidak Butuh Nilai Awal (Initial Value)**\
+  Karena **event** (seperti klik tombol atau notifikasi error) terjadi sesekali, SharedFlow dibuat
+  dalam keadaan kosong
+- **Bisa Dikonfigurasi (Replay & Buffer)**\
+  Dapat mengatur berapa banyak pesan lama yang akan di-_replay_ (diputar ulang) untuk collector yang
+  baru bergabung. Secara default, replay adalah 0 (collector baru tidak mendapat pesan lama)
+- **Unconflated**\
+  Jika pesan yang sama dikirim sebanyak 5 kali, SharedFlow akan benar-benar mengirimkannya 5 kali ke
+  semua collector
+
+**Implementasi**
+Sangat cocok untuk **One-Time Event** seperti memicu `Snackbar`, `Toast`, atau `Navigation`
+
+```kotlin
+class SharedFlowExample {
+    // 1. Inisialisasi tanpa nilai awal
+    // Bisa diatur parameter replay-nya, default adalah 0
+    private val _messageEvent = MutableSharedFlow<String>()
+
+    // 2. Ekspos sebagai SharedFlow (Read-only)
+    val messageEvent: SharedFlow<String> = _messageEvent.asSharedFlow()
+
+    fun showNotification(message: String) {
+        // 3. Mengirim event harus di dalam coroutine karena .emit() adalah suspend function
+        GlobalScope.launch {
+            _messageEvent.emit(message)
+        }
+    }
+}
+```
